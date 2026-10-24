@@ -12,29 +12,43 @@ description: >-
 
 This skill defines the exact protocol and reasoning process for an autonomous AI agent utilizing the **AutoResume MCP Tool** (`autoresume-mcp`) to fill out job application forms (Workday, Greenhouse, Lever, Ashby, Taleo, BambooHR, iCIMS, SmartRecruiters, etc.) with human-like fidelity, precision, and adherence to user preferences.
 
+> [!IMPORTANT]
+> **No Preloaded Data**: The AI agent **must not** assume that `preference.json` or `Resume.pdf` is pre-existing on disk or preloaded in the environment. All preferences and resumes are provided dynamically by the user (either uploaded via the extension side panel or provided directly in the chat).
+
 ```mermaid
 flowchart TD
-    A["Initialize: Verify preference.json & schema"] --> B["Tab Discovery & Connection Verification"]
-    B --> C["Observation: 1 DOM Snapshot + 1 Screenshot"]
-    C --> D["Plan Batch Sequence & Template References"]
-    D --> E["Execute Compound Actions via browser_batch"]
-    E --> F{"Complex Elements / Missing Info?"}
-    F -->|"Missing Info"| G["Ask User with Concise Pointers"]
-    G --> H["Update preference.json via MCP tool"]
-    H --> E
-    F -->|"Complex Elements"| I["Handle Custom Dropdowns / File Uploads"]
-    I --> J["Verification Pass: Snapshot + Screenshot"]
-    J --> K["Summary Report: Work Done & User Actions"]
+    A["Check / Obtain Resume or Preferences"] --> B{"Preferences Initialized?"}
+    B -->|"No"| C["Ask User / Process Resume into Schema"]
+    C --> D["Initialize via set_preferences & store_file"]
+    B -->|"Yes"| E["Tab Discovery & Connection Verification"]
+    D --> E
+    E --> F["Observation: 1 DOM Snapshot + 1 Screenshot"]
+    F --> G["Plan Batch Sequence & Template References"]
+    G --> H["Execute Compound Actions via browser_batch"]
+    H --> I{"Complex Elements / Missing Info?"}
+    I -->|"Missing Info"| J["Ask User with Concise Pointers"]
+    J --> K["Update preferences via update_preferences_section"]
+    K --> H
+    I -->|"Complex Elements"| L["Handle Custom Dropdowns / File Uploads"]
+    L --> M["Verification Pass: Snapshot + Screenshot"]
+    M --> N["Summary Report: Work Done & User Actions"]
 ```
 
 ---
 
 ## 2. Phase-by-Phase Execution Protocol
 
-### Phase 0: Initialization & Preference Verification
-1. Call `validate_preferences_schema` to verify that `preference.json` strictly conforms to `preferences.schema.json`.
-2. Retrieve candidate profile data via `get_preferences` if needed.
-3. If discrepancies or missing fields are detected, prompt the user for clarification before applying.
+### Phase 0: Dynamic Initialization & Resume Processing
+1. **Check Existing Preferences**:
+   - Call `get_preferences` and `list_files` to check if the user has already uploaded preferences or resume files in the extension.
+2. **If Not Initialized**:
+   - **Do not guess or assume defaults.**
+   - Prompt the user to provide their resume (by pasting text in chat or uploading `.pdf` / `.md` via the extension's **Files & Resume** tab).
+   - Once the resume content is available, extract all personal details, education history, awards, experiences, projects, technical skills, and work authorization.
+   - Construct the structured preferences object conforming strictly to `preferences.schema.json`.
+   - Call `set_preferences({ preferences: candidateData })` to load the profile into the MCP runtime.
+   - If a resume file was provided, call `store_file({ name: "Resume.pdf", data: base64 })` so the file upload tool can inject it into forms.
+3. Call `validate_preferences_schema` to guarantee 100% compliance.
 
 ---
 
@@ -88,7 +102,7 @@ For every interactive field, adhere strictly to the following natural sequence:
 
 ### Phase 4: Missing Information & Ambiguity Handling
 1. **Zero Hallucination Policy**:
-   - If a form asks a question whose answer cannot be derived with certainty from `preference.json`:
+   - If a form asks a question whose answer cannot be derived with certainty from preferences (e.g., "Expected salary", "Willing to relocate?", "How did you hear about this opening?"):
    - **DO NOT GUESS OR INVENT ANSWERS.**
    - Skip the field temporarily and collect all ambiguous questions.
 2. **Concise User Inquiries (Pointers Only)**:
@@ -104,7 +118,7 @@ For every interactive field, adhere strictly to the following natural sequence:
    - `browser_snapshot`: Confirm that all inputs contain the expected values and no validation error messages (`aria-invalid="true"`, `"This field is required"`) are displayed.
    - `browser_screenshot`: Visually confirm all radio toggles, checkboxes, and attachments are attached.
 2. **File Uploads**:
-   - For resume and cover letter upload fields, use `file_upload` with `fileName: "Resume.pdf"`.
+   - For resume and cover letter upload fields, use `file_upload` with `fileName: "Resume.pdf"` (from stored files) or inline base64 data.
    - Do NOT click on native file inputs with `browser_click` as native OS file dialogs cannot be interacted with via DOM scripts.
 3. **Never Submit Without Human Consent**:
    - Stop at the final "Review" or "Submit Application" button.
@@ -112,10 +126,10 @@ For every interactive field, adhere strictly to the following natural sequence:
    - Conclude with a clean Markdown report strictly adhering to the two-section format:
      ```markdown
      ### Work Completed
-     - Filled Personal Information (First Name, Last Name, Email, Phone, Address, LinkedIn, GitHub).
-     - Filled Education (Penn State University, B.S. in Computer Science, GPA: 4.0/4.0, Expected: May 2028).
+     - Filled Personal Information (First Name, Last Name, Email, Phone, Address, Links).
+     - Filled Education (Degree, Institution, Dates, GPA).
      - Uploaded Resume (`Resume.pdf`).
-     - Selected Work Authorization: Legally authorized to work, requires F-1 visa sponsorship.
+     - Selected Work Authorization preferences.
 
      ### User Actions Remaining
      - Review voluntary demographic and diversity self-identification disclosures.

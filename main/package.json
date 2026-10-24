@@ -6,8 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "node mcp-server/src/index.js",
-    "mcp": "node mcp-server/src/index.js",
-    "validate:prefs": "node -e \"import('./preferences/validator.js').then(m => { const fs = await import('fs'); const pref = JSON.parse(fs.readFileSync('./preferences/preference.json', 'utf8')); console.log(m.validatePreferences(pref)); })\""
+    "mcp": "node mcp-server/src/index.js"
   },
   "keywords": [
     "mcp",
@@ -18,6 +17,6 @@
     "claude-desktop",
     "gemini"
   ],
-  "author": "Himanshu Sultania",
+  "author": "AutoResume Team",
   "license": "MIT"
 }
