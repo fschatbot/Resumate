@@ -379,6 +379,21 @@ rl.on('line', (line) => {
   }
 });
 
+rl.on('close', async () => {
+  await bridge.stop();
+  process.exit(0);
+});
+
+process.stdin.on('end', async () => {
+  await bridge.stop();
+  process.exit(0);
+});
+
+process.stdin.on('close', async () => {
+  await bridge.stop();
+  process.exit(0);
+});
+
 // Graceful shutdown
 process.on('SIGINT', async () => {
   await bridge.stop();

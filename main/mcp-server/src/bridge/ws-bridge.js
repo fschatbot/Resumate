@@ -2,6 +2,7 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
+import { execSync } from 'node:child_process';
 
 const require = createRequire(import.meta.url);
 const { WebSocketServer, WebSocket } = require('ws');
@@ -12,6 +13,32 @@ export const DEFAULT_TIMEOUT_MS = 30000;
 export const NO_EXTENSION_MESSAGE = 
   "No active browser tab connected to AutoResume. " +
   "Please click the AutoResume extension icon in Chrome and ensure the target tab is in the 'AutoResume (MCP)' tab group.";
+
+/**
+ * Frees the port if an orphaned/zombie process is holding it.
+ * @param {number} port
+ */
+function freePortIfOccupied(port) {
+  try {
+    if (process.platform === 'win32') {
+      const output = execSync(`netstat -ano | findstr :${port}`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      const lines = output.trim().split('\n');
+      for (const line of lines) {
+        if (!line.includes('LISTENING')) continue;
+        const parts = line.trim().split(/\s+/);
+        const pid = parseInt(parts[parts.length - 1], 10);
+        if (pid && pid !== process.pid) {
+          console.error(`[ExtensionBridge] Terminating orphaned process ${pid} occupying port ${port}...`);
+          try {
+            execSync(`taskkill /F /PID ${pid}`, { stdio: 'ignore' });
+          } catch (e) {}
+        }
+      }
+    }
+  } catch (e) {
+    // Port was not occupied or command failed safely
+  }
+}
 
 /**
  * WebSocket Communication Bridge between MCP Server and Chrome Extension using ws library.
@@ -30,11 +57,14 @@ export class ExtensionBridge extends EventEmitter {
 
   /**
    * Starts the bridge WebSocket server.
-   * Gracefully handles EADDRINUSE if another instance is already running on the port.
+   * Auto-reclaims port 9001 if occupied by an orphaned process.
    * @returns {Promise<void>}
    */
   async start() {
     return new Promise((resolve) => {
+      // Clean up any stale process occupying the port
+      freePortIfOccupied(this.port);
+
       this.httpServer = http.createServer((req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
@@ -44,13 +74,23 @@ export class ExtensionBridge extends EventEmitter {
         }));
       });
 
+      let retried = false;
       this.httpServer.on('error', (err) => {
-        if (err.code === 'EADDRINUSE') {
-          console.error(`[ExtensionBridge] Note: Port ${this.port} in use by another instance. Continuing without dedicated listener.`);
+        if (err.code === 'EADDRINUSE' && !retried) {
+          retried = true;
+          console.error(`[ExtensionBridge] Port ${this.port} busy. Reclaiming from orphaned process...`);
+          freePortIfOccupied(this.port);
+          setTimeout(() => {
+            try {
+              this.httpServer.listen(this.port, '127.0.0.1');
+            } catch (e) {
+              resolve();
+            }
+          }, 300);
         } else {
-          console.error(`[ExtensionBridge] Server error:`, err.message);
+          console.error(`[ExtensionBridge] Server notice:`, err.message);
+          resolve();
         }
-        resolve(); // Do not throw or reject, allow MCP stdio server to continue
       });
 
       try {

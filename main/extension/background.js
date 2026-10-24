@@ -410,7 +410,7 @@ function scheduleBridgeReconnect() {
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connectWebSocketBridge();
-  }, 3000);
+  }, 1000);
 }
 
 // ============================================================================
@@ -1003,6 +1003,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "CLEAR_FEED") {
     toolExecutionHistory.length = 0;
     broadcastTelemetry();
+    sendResponse({ success: true });
+    return true;
+  }
+
+  if (msg.type === "RECONNECT_BRIDGE") {
+    connectWebSocketBridge();
     sendResponse({ success: true });
     return true;
   }
