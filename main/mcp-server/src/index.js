@@ -19,7 +19,8 @@ import {
   handleUpdatePreferencesSection,
   handleGetPreferences,
   handleStoreFile,
-  handleListFiles
+  handleListFiles,
+  setSyncCallback
 } from './tools/schema-tools.js';
 import {
   resolveTemplateVariables,
@@ -36,9 +37,15 @@ const __dirname = path.dirname(__filename);
 const SERVER_NAME = "autoresume-mcp";
 const SERVER_VERSION = "1.0.0";
 
-// Port configuration
-const wsPort = parseInt(process.env.MCP_WS_PORT || process.argv[2] || DEFAULT_WS_PORT, 10);
+// Port configuration (safe numeric extraction)
+const portArg = process.argv.slice(2).find(arg => /^\d+$/.test(arg));
+const wsPort = parseInt(process.env.MCP_WS_PORT || portArg || DEFAULT_WS_PORT, 10);
 const bridge = new ExtensionBridge(wsPort);
+
+// Wire bidirectional sync from MCP tool updates to extension
+setSyncCallback((type, payload) => {
+  bridge.sendNotification(type, payload);
+});
 
 // Listen for sync events from the Chrome Extension
 bridge.on('extension_event', (msg) => {
@@ -122,10 +129,12 @@ function formatToolError(error) {
  */
 async function handleJsonRpcRequest(request) {
   const { id, method, params } = request;
+  const isNotification = id === undefined || id === null;
 
   try {
     switch (method) {
       case "initialize": {
+        if (isNotification) return;
         return sendResponse({
           jsonrpc: "2.0",
           id,
@@ -143,16 +152,19 @@ async function handleJsonRpcRequest(request) {
         });
       }
 
-      case "notifications/initialized": {
-        // Notification, no response needed
+      case "notifications/initialized":
+      case "initialized": {
+        // Notification, no response permitted
         return;
       }
 
       case "ping": {
+        if (isNotification) return;
         return sendResponse({ jsonrpc: "2.0", id, result: {} });
       }
 
       case "tools/list": {
+        if (isNotification) return;
         return sendResponse({
           jsonrpc: "2.0",
           id,
@@ -163,7 +175,8 @@ async function handleJsonRpcRequest(request) {
       }
 
       case "tools/call": {
-        const toolName = params?.name;
+        if (isNotification) return;
+        let toolName = params?.name;
         const rawArgs = params?.arguments || {};
 
         if (!toolName) {
@@ -174,7 +187,12 @@ async function handleJsonRpcRequest(request) {
           });
         }
 
-        if (!TOOLS_BY_NAME.has(toolName)) {
+        // Support read_page as alias for browser_snapshot
+        if (toolName === "read_page") {
+          toolName = "browser_snapshot";
+        }
+
+        if (!TOOLS_BY_NAME.has(toolName) && toolName !== "browser_snapshot") {
           return sendResponse({
             jsonrpc: "2.0",
             id,
@@ -182,37 +200,48 @@ async function handleJsonRpcRequest(request) {
           });
         }
 
-        // Automatic template substitution: resolve ${preferences.path} references if preferences are active
-        const resolvedArgs = resolveTemplateVariables(rawArgs);
+        // Automatic template substitution: resolve ${preferences.path} references
+        // But do not corrupt raw arguments for set_preferences or update_preferences_section
+        const resolvedArgs = (toolName === "set_preferences" || toolName === "update_preferences_section")
+          ? rawArgs
+          : resolveTemplateVariables(rawArgs);
 
         let executionResult;
 
-        // Local preference & session file tools
-        if (toolName === "set_preferences") {
-          executionResult = handleSetPreferences(resolvedArgs);
-        } else if (toolName === "validate_preferences_schema") {
-          executionResult = handleValidatePreferencesSchema(resolvedArgs);
-        } else if (toolName === "update_preferences_section") {
-          executionResult = handleUpdatePreferencesSection(resolvedArgs);
-        } else if (toolName === "get_preferences") {
-          executionResult = handleGetPreferences(resolvedArgs);
-        } else if (toolName === "store_file") {
-          executionResult = handleStoreFile(resolvedArgs);
-        } else if (toolName === "list_files") {
-          executionResult = handleListFiles();
-        } else {
-          // Browser automation tools routed to extension bridge
-          executionResult = await bridge.executeTool(toolName, resolvedArgs);
-        }
+        try {
+          if (toolName === "set_preferences") {
+            executionResult = handleSetPreferences(resolvedArgs);
+          } else if (toolName === "validate_preferences_schema") {
+            executionResult = handleValidatePreferencesSchema(resolvedArgs);
+          } else if (toolName === "update_preferences_section") {
+            executionResult = handleUpdatePreferencesSection(resolvedArgs);
+          } else if (toolName === "get_preferences") {
+            executionResult = handleGetPreferences(resolvedArgs);
+          } else if (toolName === "store_file") {
+            executionResult = handleStoreFile(resolvedArgs);
+          } else if (toolName === "list_files") {
+            executionResult = handleListFiles();
+          } else {
+            // Browser automation tools routed to extension bridge
+            executionResult = await bridge.executeTool(toolName, resolvedArgs);
+          }
 
-        return sendResponse({
-          jsonrpc: "2.0",
-          id,
-          result: formatToolSuccess(executionResult)
-        });
+          return sendResponse({
+            jsonrpc: "2.0",
+            id,
+            result: formatToolSuccess(executionResult)
+          });
+        } catch (toolErr) {
+          return sendResponse({
+            jsonrpc: "2.0",
+            id,
+            result: formatToolError(toolErr)
+          });
+        }
       }
 
       case "resources/list": {
+        if (isNotification) return;
         return sendResponse({
           jsonrpc: "2.0",
           id,
@@ -235,7 +264,30 @@ async function handleJsonRpcRequest(request) {
         });
       }
 
+      case "resources/templates/list": {
+        if (isNotification) return;
+        return sendResponse({
+          jsonrpc: "2.0",
+          id,
+          result: {
+            resourceTemplates: []
+          }
+        });
+      }
+
+      case "prompts/list": {
+        if (isNotification) return;
+        return sendResponse({
+          jsonrpc: "2.0",
+          id,
+          result: {
+            prompts: []
+          }
+        });
+      }
+
       case "resources/read": {
+        if (isNotification) return;
         const uri = params?.uri;
         if (uri === "preference://active") {
           const prefs = getLoadedPreferences();
@@ -280,6 +332,7 @@ async function handleJsonRpcRequest(request) {
       }
 
       default: {
+        if (isNotification) return;
         return sendResponse({
           jsonrpc: "2.0",
           id,
@@ -289,23 +342,24 @@ async function handleJsonRpcRequest(request) {
     }
   } catch (err) {
     console.error(`[MCP Server] Error executing method '${method}':`, err);
-    return sendResponse({
-      jsonrpc: "2.0",
-      id,
-      result: formatToolError(err)
-    });
+    if (!isNotification) {
+      return sendResponse({
+        jsonrpc: "2.0",
+        id,
+        error: { code: -32603, message: err.message || "Internal server error" }
+      });
+    }
   }
 }
 
 // Start WebSocket Bridge
 bridge.start().catch((err) => {
-  console.error("[MCP Server] Failed to start WebSocket bridge:", err.message);
+  console.error("[MCP Server] Note on WebSocket bridge:", err.message);
 });
 
-// Setup readline interface for stdio JSON-RPC messages
+// Setup readline interface for stdio JSON-RPC messages WITHOUT echoing to stdout
 const rl = readline.createInterface({
   input: process.stdin,
-  output: process.stdout,
   terminal: false
 });
 
@@ -317,6 +371,11 @@ rl.on('line', (line) => {
     handleJsonRpcRequest(request);
   } catch (err) {
     console.error("[MCP Server] Received malformed JSON line:", trimmed);
+    sendResponse({
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32700, message: "Parse error: Invalid JSON was received by the server." }
+    });
   }
 });
 

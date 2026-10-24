@@ -15,19 +15,19 @@ export const PREFERENCE_SECTIONS = [
 
 /**
  * Validates a preferences object or section.
- * @param {object} data
+ * @param {object} data - Full preferences object or section data
  * @param {string} [section] - Optional specific section to validate
  * @returns {{ valid: boolean, errors: string[] }}
  */
 export function validatePreferences(data, section = null) {
   const errors = [];
 
-  if (!data || typeof data !== "object") {
-    return { valid: false, errors: ["Preferences payload must be a non-null object."] };
+  if (data === null || data === undefined) {
+    return { valid: false, errors: ["Preferences payload must be provided."] };
   }
 
   const validateGeneral = (gen) => {
-    if (!gen || typeof gen !== "object") {
+    if (!gen || typeof gen !== "object" || Array.isArray(gen)) {
       errors.push("Missing or invalid 'general' section.");
       return;
     }
@@ -35,19 +35,20 @@ export function validatePreferences(data, section = null) {
     if (!gen.lastName) errors.push("general.lastName is required.");
     if (!gen.fullName) errors.push("general.fullName is required.");
     if (!gen.email || !gen.email.includes("@")) errors.push("general.email must be a valid email address.");
-    if (!gen.phone || typeof gen.phone !== "object") {
+    if (!gen.phone || typeof gen.phone !== "object" || Array.isArray(gen.phone)) {
       errors.push("general.phone object is required.");
     } else {
       if (!gen.phone.digits10 || !/^\d{10}$/.test(gen.phone.digits10)) {
         errors.push("general.phone.digits10 must be exactly 10 digits.");
       }
       if (!gen.phone.countryCode) errors.push("general.phone.countryCode is required.");
+      if (!gen.phone.formatted) errors.push("general.phone.formatted is required.");
     }
   };
 
   const validateEducation = (eduList) => {
-    if (!Array.isArray(eduList) || eduList.length === 0) {
-      errors.push("Missing or empty 'education' array.");
+    if (!Array.isArray(eduList)) {
+      errors.push("'education' must be an array.");
       return;
     }
     eduList.forEach((edu, idx) => {
@@ -55,7 +56,9 @@ export function validatePreferences(data, section = null) {
       if (!edu.degree) errors.push(`education[${idx}].degree is required.`);
       if (!edu.major) errors.push(`education[${idx}].major is required.`);
       if (!edu.graduationDate) errors.push(`education[${idx}].graduationDate is required.`);
-      if (!Array.isArray(edu.pointers)) errors.push(`education[${idx}].pointers must be an array of strings.`);
+      if (edu.pointers !== undefined && !Array.isArray(edu.pointers)) {
+        errors.push(`education[${idx}].pointers must be an array of strings.`);
+      }
     });
   };
 
@@ -68,7 +71,9 @@ export function validatePreferences(data, section = null) {
       if (!exp.company) errors.push(`experience[${idx}].company is required.`);
       if (!exp.role) errors.push(`experience[${idx}].role is required.`);
       if (!exp.startDate) errors.push(`experience[${idx}].startDate is required.`);
-      if (!Array.isArray(exp.pointers)) errors.push(`experience[${idx}].pointers must be an array of strings.`);
+      if (exp.pointers !== undefined && !Array.isArray(exp.pointers)) {
+        errors.push(`experience[${idx}].pointers must be an array of strings.`);
+      }
     });
   };
 
@@ -79,13 +84,17 @@ export function validatePreferences(data, section = null) {
     }
     projList.forEach((proj, idx) => {
       if (!proj.title) errors.push(`projects[${idx}].title is required.`);
-      if (!Array.isArray(proj.technologies)) errors.push(`projects[${idx}].technologies must be an array.`);
-      if (!Array.isArray(proj.pointers)) errors.push(`projects[${idx}].pointers must be an array of strings.`);
+      if (proj.technologies !== undefined && !Array.isArray(proj.technologies)) {
+        errors.push(`projects[${idx}].technologies must be an array.`);
+      }
+      if (proj.pointers !== undefined && !Array.isArray(proj.pointers)) {
+        errors.push(`projects[${idx}].pointers must be an array of strings.`);
+      }
     });
   };
 
   const validateSkills = (skills) => {
-    if (!skills || typeof skills !== "object") {
+    if (!skills || typeof skills !== "object" || Array.isArray(skills)) {
       errors.push("Missing or invalid 'skills' section.");
       return;
     }
@@ -101,25 +110,37 @@ export function validatePreferences(data, section = null) {
   };
 
   if (section) {
+    // If caller passed root object containing the section, unwrap it; otherwise use payload directly
+    const sectionData = (typeof data === "object" && data !== null && !Array.isArray(data) && section in data)
+      ? data[section]
+      : data;
+
     switch (section) {
-      case "general": validateGeneral(data); break;
-      case "education": validateEducation(data); break;
-      case "experience": validateExperience(data); break;
-      case "projects": validateProjects(data); break;
-      case "skills": validateSkills(data); break;
+      case "general": validateGeneral(sectionData); break;
+      case "education": validateEducation(sectionData); break;
+      case "experience": validateExperience(sectionData); break;
+      case "projects": validateProjects(sectionData); break;
+      case "skills": validateSkills(sectionData); break;
       case "awards":
-        if (!Array.isArray(data)) errors.push("awards must be an array.");
+        if (!Array.isArray(sectionData)) errors.push("awards must be an array.");
         break;
       case "demographicsAndLegal":
-        if (typeof data !== "object") errors.push("demographicsAndLegal must be an object.");
+        if (typeof sectionData !== "object" || sectionData === null || Array.isArray(sectionData)) {
+          errors.push("demographicsAndLegal must be an object.");
+        }
         break;
       case "customQA":
-        if (typeof data !== "object") errors.push("customQA must be an object.");
+        if (typeof sectionData !== "object" || sectionData === null || Array.isArray(sectionData)) {
+          errors.push("customQA must be an object.");
+        }
         break;
       default:
         errors.push(`Unknown preference section: '${section}'`);
     }
   } else {
+    if (typeof data !== "object" || data === null || Array.isArray(data)) {
+      return { valid: false, errors: ["Preferences payload must be a non-null object."] };
+    }
     validateGeneral(data.general);
     validateEducation(data.education);
     validateExperience(data.experience);
@@ -134,8 +155,8 @@ export function validatePreferences(data, section = null) {
 }
 
 /**
- * Traverses an object using a dot/bracket notation path.
- * e.g. "general.phone.digits10" or "education[0].institution"
+ * Traverses an object using a dot/bracket notation path safely without prototype pollution.
+ * Supports: "general.phone.digits10", "education[0].institution", "customQA['willing-to-relocate']"
  * @param {object} obj
  * @param {string} path
  * @returns {any}
@@ -143,44 +164,53 @@ export function validatePreferences(data, section = null) {
 export function getPreferenceByPath(obj, path) {
   if (!obj || !path) return undefined;
   
-  // Normalize bracket notation: education[0].institution -> education.0.institution
-  const cleanPath = path
-    .replace(/^preferences\./i, "")
-    .replace(/\[(\w+)\]/g, ".$1")
-    .replace(/^\./, "");
+  const cleanPath = path.replace(/^preferences\./i, "").trim();
+  if (!cleanPath) return obj;
 
-  const parts = cleanPath.split(".");
+  // Tokenize dot and bracket notations safely
+  const tokens = [];
+  const regex = /(?:^|\.)([^\.\[\]]+)|\[['"]?([^'"\]]+)['"]?\]/g;
+  let match;
+  while ((match = regex.exec(cleanPath)) !== null) {
+    const prop = match[1] !== undefined ? match[1] : match[2];
+    if (prop) tokens.push(prop);
+  }
+
   let current = obj;
-  for (const part of parts) {
+  for (const token of tokens) {
     if (current === null || current === undefined) return undefined;
-    current = current[part];
+    // Guard against prototype pollution
+    if (token === '__proto__' || token === 'constructor' || token === 'prototype') {
+      return undefined;
+    }
+    if (typeof current !== 'object') return undefined;
+    current = current[token];
   }
   return current;
 }
 
 /**
- * Resolves template strings like "${preferences.general.firstName} ${preferences.general.lastName}"
- * using the provided preferences object.
- * @param {any} input - String or nested object/array
- * @param {object} preferences - Preferences data object
- * @returns {any} Resolved value or unchanged input
+ * Resolves template strings using the provided preferences object.
+ * When preferences are active, unresolvable tokens resolve to empty string rather than
+ * sending raw "${preferences...}" into form fields.
+ * @param {any} input
+ * @param {object} preferences
+ * @returns {any}
  */
 export function resolvePreferenceTemplate(input, preferences) {
   if (!preferences || typeof preferences !== "object") return input;
 
   if (typeof input === "string") {
-    // Check if the entire string is a single template token: "${preferences.xyz}"
     const singleTokenMatch = input.trim().match(/^\$\{preferences\.([^}]+)\}$/);
     if (singleTokenMatch) {
       const resolved = getPreferenceByPath(preferences, singleTokenMatch[1]);
-      if (resolved !== undefined) return resolved;
+      return resolved !== undefined ? resolved : "";
     }
 
-    // Replace all occurrences in template string
-    return input.replace(/\$\{preferences\.([^}]+)\}/g, (match, path) => {
-      const val = getPreferenceByPath(preferences, path);
+    return input.replace(/\$\{preferences\.([^}]+)\}/g, (match, pathKey) => {
+      const val = getPreferenceByPath(preferences, pathKey);
       if (val === undefined || val === null) {
-        return match; // preserve token if unresolved
+        return "";
       }
       if (typeof val === "object") {
         return JSON.stringify(val);

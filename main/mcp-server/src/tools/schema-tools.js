@@ -10,9 +10,19 @@ import {
 // In-memory registry of files uploaded by the user or registered by the AI agent
 const sessionFiles = new Map();
 
+// Sync listener (e.g. WebSocket bridge to Chrome Extension)
+let syncCallback = null;
+
+/**
+ * Registers a sync callback to broadcast state updates to the Chrome Extension.
+ * @param {(type: string, payload: any) => void} fn
+ */
+export function setSyncCallback(fn) {
+  syncCallback = fn;
+}
+
 /**
  * Initializes or sets the applicant preferences.
- * Call this after the AI agent parses the user's resume or when the user uploads a preference JSON.
  * @param {object} args
  * @param {object} args.preferences - The preferences object matching preferences.schema.json
  * @param {string} [args.source="agent"] - Source origin ("agent", "extension_upload", "user")
@@ -21,26 +31,26 @@ const sessionFiles = new Map();
 export function handleSetPreferences(args = {}) {
   const { preferences, source = "agent" } = args;
 
-  if (!preferences || typeof preferences !== 'object') {
-    return {
-      success: false,
-      error: "INVALID_ARGUMENT",
-      message: "Missing required argument: 'preferences' (must be an object matching preferences.schema.json)."
-    };
+  if (!preferences || typeof preferences !== 'object' || Array.isArray(preferences)) {
+    throw new Error("Missing required argument: 'preferences' (must be a valid JSON object matching preferences.schema.json).");
   }
 
   // Validate against schema
   const validation = validatePreferences(preferences);
   if (!validation.valid) {
-    return {
-      success: false,
-      error: "SCHEMA_VALIDATION_FAILED",
-      errors: validation.errors,
-      message: `Provided preferences failed schema validation with ${validation.errors.length} error(s).`
-    };
+    throw new Error(`Preferences failed schema validation (${validation.errors.length} error(s)): ${validation.errors.join('; ')}`);
   }
 
   setPreferences(preferences, source);
+
+  // Sync to Chrome Extension if connected
+  if (syncCallback) {
+    try {
+      syncCallback('preferences_sync', preferences);
+    } catch (err) {
+      console.error('[SchemaTools] Failed to sync preferences to extension:', err.message);
+    }
+  }
 
   return {
     success: true,
@@ -63,21 +73,24 @@ export function handleValidatePreferencesSchema(args = {}) {
   const section = args.section || null;
 
   if (!data) {
-    return {
-      valid: false,
-      error: "PREFERENCES_NOT_PROVIDED",
-      message: "No preferences provided to validate. Please provide 'preferences' in the tool arguments or call set_preferences first."
-    };
+    throw new Error("No preferences provided to validate. Please provide 'preferences' in the tool arguments or call set_preferences first.");
   }
 
   const result = validatePreferences(data, section);
+  if (!result.valid) {
+    return {
+      valid: false,
+      section: section || "all",
+      errors: result.errors,
+      message: `Preferences schema validation failed with ${result.errors.length} error(s): ${result.errors.join('; ')}`
+    };
+  }
+
   return {
-    valid: result.valid,
+    valid: true,
     section: section || "all",
-    errors: result.errors,
-    message: result.valid
-      ? `Preferences schema validation succeeded for ${section ? `section '${section}'` : 'entire document'}.`
-      : `Preferences schema validation failed with ${result.errors.length} error(s).`
+    errors: [],
+    message: `Preferences schema validation succeeded for ${section ? `section '${section}'` : 'entire document'}.`
   };
 }
 
@@ -91,18 +104,14 @@ export function handleValidatePreferencesSchema(args = {}) {
  */
 export function handleUpdatePreferencesSection(args) {
   if (!args || !args.section) {
-    return {
-      success: false,
-      error: "MISSING_SECTION",
-      message: "Missing required argument: 'section'"
-    };
+    throw new Error("Missing required argument: 'section'");
   }
 
   let current = getLoadedPreferences();
   if (!current) {
     current = {};
   } else {
-    current = JSON.parse(JSON.stringify(current)); // clone
+    current = JSON.parse(JSON.stringify(current)); // deep clone
   }
 
   const { section, data, overwrite = false } = args;
@@ -113,7 +122,10 @@ export function handleUpdatePreferencesSection(args) {
     } else {
       current[section].push(...data);
     }
-  } else if (typeof current[section] === 'object' && typeof data === 'object' && data !== null) {
+  } else if (
+    typeof current[section] === 'object' && current[section] !== null && !Array.isArray(current[section]) &&
+    typeof data === 'object' && data !== null && !Array.isArray(data)
+  ) {
     if (overwrite) {
       current[section] = data;
     } else {
@@ -126,15 +138,19 @@ export function handleUpdatePreferencesSection(args) {
   // Validate section post-update
   const validation = validatePreferences(current, section);
   if (!validation.valid) {
-    return {
-      success: false,
-      section,
-      errors: validation.errors,
-      message: `Failed to update section '${section}' because the resulting data violates schema.`
-    };
+    throw new Error(`Failed to update section '${section}' because the resulting data violates schema: ${validation.errors.join('; ')}`);
   }
 
   setPreferences(current, getPreferencesSource() || 'agent');
+
+  // Sync to Chrome Extension if connected
+  if (syncCallback) {
+    try {
+      syncCallback('preferences_sync', current);
+    } catch (err) {
+      console.error('[SchemaTools] Failed to sync updated preferences to extension:', err.message);
+    }
+  }
 
   return {
     success: true,
@@ -152,11 +168,7 @@ export function handleUpdatePreferencesSection(args) {
  */
 export function handleGetPreferences(args = {}) {
   if (!hasPreferences()) {
-    return {
-      success: false,
-      error: "PREFERENCES_NOT_INITIALIZED",
-      message: "Preferences have not been provided yet. The AI agent must process the user's resume first or the user must upload their resume/preferences in the extension."
-    };
+    throw new Error("Preferences have not been provided yet. The AI agent must process the user's resume first or the user must upload their resume/preferences in the extension.");
   }
 
   const current = getLoadedPreferences();
@@ -169,16 +181,21 @@ export function handleGetPreferences(args = {}) {
   }
 
   const val = getNestedProperty(current, args.path);
+  if (val === undefined) {
+    throw new Error(`Path '${args.path}' not found in active preferences.`);
+  }
+
   return {
-    success: val !== undefined,
+    success: true,
     path: args.path,
-    data: val !== undefined ? val : null,
-    message: val !== undefined ? `Retrieved value for '${args.path}'` : `Path '${args.path}' not found in preferences.`
+    data: val,
+    message: `Retrieved value for '${args.path}'`
   };
 }
 
 /**
  * Stores or registers a file (e.g. resume PDF/MD) into the session file storage.
+ * Synchronizes immediately with the Chrome Extension so file_upload can access it.
  * @param {object} args
  * @param {string} args.name - Filename (e.g. "Resume.pdf")
  * @param {string} [args.data] - Base64 encoded file content
@@ -188,20 +205,31 @@ export function handleGetPreferences(args = {}) {
  */
 export function handleStoreFile(args = {}) {
   if (!args.name) {
-    return { success: false, error: "MISSING_NAME", message: "Argument 'name' is required." };
+    throw new Error("Missing required argument: 'name'");
   }
 
-  sessionFiles.set(args.name, {
+  const fileEntry = {
     name: args.name,
     data: args.data || null,
     mimeType: args.mimeType || (args.name.endsWith('.pdf') ? 'application/pdf' : 'text/plain'),
     description: args.description || 'User provided file',
     uploadedAt: new Date().toISOString()
-  });
+  };
+
+  sessionFiles.set(args.name, fileEntry);
+
+  // Sync file over to the Chrome Extension so file_upload can find it in storage
+  if (syncCallback) {
+    try {
+      syncCallback('file_sync', fileEntry);
+    } catch (err) {
+      console.error('[SchemaTools] Failed to sync stored file to extension:', err.message);
+    }
+  }
 
   return {
     success: true,
-    message: `File '${args.name}' successfully stored in session storage for web form injection.`,
+    message: `File '${args.name}' successfully stored in session storage and synchronized to the browser extension.`,
     fileName: args.name
   };
 }
@@ -215,8 +243,8 @@ export function handleListFiles() {
     name: f.name,
     mimeType: f.mimeType,
     description: f.description,
-    uploadedAt: f.uploadedAt,
-    hasContent: Boolean(f.data)
+    hasData: Boolean(f.data),
+    uploadedAt: f.uploadedAt
   }));
 
   return {

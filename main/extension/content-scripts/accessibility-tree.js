@@ -2,7 +2,8 @@
  * content-scripts/accessibility-tree.js
  *
  * Generates semantic Accessibility Tree snapshots serialized as YAML for LLM grounding.
- * Combines ARIA role computation, label resolution, form state detection, and handle assignment.
+ * Combines ARIA role computation, label resolution, form state detection, select value inspection,
+ * shadow DOM traversal, and handle assignment.
  */
 
 (() => {
@@ -18,6 +19,11 @@
   const IGNORED_TAGS = new Set([
     'SCRIPT', 'STYLE', 'NOSCRIPT', 'SVG', 'PATH', 'META', 'LINK', 'TEMPLATE'
   ]);
+
+  function sanitizeYamlString(str) {
+    if (!str) return '';
+    return str.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\r\n\t]+/g, ' ').trim();
+  }
 
   /**
    * Computes the semantic ARIA role of a DOM element.
@@ -78,8 +84,10 @@
 
     // 3. Associated <label>
     if (el.id) {
-      const labelEl = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
-      if (labelEl && labelEl.textContent.trim()) return labelEl.textContent.trim();
+      try {
+        const labelEl = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+        if (labelEl && labelEl.textContent.trim()) return labelEl.textContent.trim();
+      } catch (e) {}
     }
     const parentLabel = el.closest('label');
     if (parentLabel && parentLabel !== el) {
@@ -144,7 +152,15 @@
         states.push('type: password');
       } else if (el.value && !['submit', 'button', 'checkbox', 'radio'].includes(type)) {
         const valPreview = el.value.length > 30 ? el.value.slice(0, 30) + '...' : el.value;
-        states.push(`value: "${valPreview}"`);
+        states.push(`value: "${sanitizeYamlString(valPreview)}"`);
+      }
+    }
+
+    if (el.tagName === 'SELECT') {
+      const selectedOption = el.options && el.selectedIndex >= 0 ? el.options[el.selectedIndex] : null;
+      const valText = selectedOption ? (selectedOption.text || selectedOption.value) : el.value;
+      if (valText) {
+        states.push(`value: "${sanitizeYamlString(valText)}"`);
       }
     }
 
@@ -160,7 +176,7 @@
    * @returns {{ yaml: string, title: string, url: string, totalNodes: number, interactiveCount: number }}
    */
   window.__generateAccessibilityTree = function(filter = 'all', maxDepth = 15, maxChars = 50000, rootRefId = null) {
-    let startNode = document.body;
+    let startNode = document.body || document.documentElement;
     if (rootRefId && window.__getElementByRef) {
       const customRoot = window.__getElementByRef(rootRefId);
       if (customRoot) startNode = customRoot;
@@ -171,14 +187,15 @@
     let interactiveCount = 0;
 
     // Root line
-    lines.push(`- RootWebArea "${document.title.replace(/"/g, '\\"')}" [url: ${window.location.href}]`);
+    const safeTitle = sanitizeYamlString(document.title);
+    lines.push(`- RootWebArea "${safeTitle}" [url: ${window.location.href}]`);
 
     function traverse(node, depth) {
       if (!node || depth > maxDepth) return;
       if (IGNORED_TAGS.has(node.tagName)) return;
 
-      const style = window.getComputedStyle(node);
-      if (style.display === 'none' || style.visibility === 'hidden') return;
+      const style = window.getComputedStyle ? window.getComputedStyle(node) : null;
+      if (style && (style.display === 'none' || style.visibility === 'hidden')) return;
 
       const role = computeRole(node);
       const isInteractive = INTERACTIVE_ROLES.has(role) || node.hasAttribute('tabindex') || node.onclick;
@@ -197,17 +214,35 @@
       if (shouldInclude && (role !== 'generic' || accessibleName || refHandle)) {
         totalNodes++;
         const indent = '  '.repeat(depth);
-        const nameStr = accessibleName ? ` "${accessibleName.replace(/"/g, '\\"')}"` : '';
+        const nameStr = accessibleName ? ` "${sanitizeYamlString(accessibleName)}"` : '';
         const stateStr = states.length > 0 ? ` [${states.join(', ')}]` : '';
         lines.push(`${indent}- ${role}${nameStr}${stateStr}`);
       }
 
+      // Traverse light DOM children
       for (const child of node.children) {
         traverse(child, depth + 1);
       }
+
+      // Traverse Shadow DOM if present (Workday / Web Components)
+      if (node.shadowRoot) {
+        for (const child of node.shadowRoot.children) {
+          traverse(child, depth + 1);
+        }
+      }
+
+      // Traverse assigned nodes for <slot> elements
+      if (node.tagName === 'SLOT' && typeof node.assignedNodes === 'function') {
+        const assigned = node.assignedNodes().filter(n => n instanceof Element);
+        for (const child of assigned) {
+          traverse(child, depth + 1);
+        }
+      }
     }
 
-    traverse(startNode, 1);
+    if (startNode) {
+      traverse(startNode, 1);
+    }
 
     let output = lines.join('\n');
     if (output.length > maxChars) {

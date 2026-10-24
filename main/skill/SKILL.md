@@ -39,7 +39,7 @@ flowchart TD
    - Once the resume content is available, extract all personal details, education history, awards, experiences, projects, technical skills, and work authorization.
    - Construct the structured preferences object conforming strictly to `preferences.schema.json`.
    - Call `set_preferences({ preferences: candidateData })` to load the profile into the MCP runtime.
-   - If a resume file was provided, call `store_file({ name: "Resume.pdf", data: base64 })` so the file upload tool can inject it into forms.
+   - If a resume file was provided, call `store_file({ name: "Resume.pdf", data: base64 })`. The MCP server immediately synchronizes the file to the Chrome Extension so `file_upload` can access it.
 3. Call `validate_preferences_schema` to guarantee 100% compliance.
 
 ---
@@ -54,7 +54,7 @@ flowchart TD
 
 ### Phase 2: Dual Observation (DOM + Vision)
 Before performing any mutation or typing on a new page or section:
-1. **DOM Read**: Call `browser_snapshot` (or `read_page`) to generate the semantic Accessibility Tree. This creates unique element identifiers (`@e1`, `@e2`, or `ref_1`, `ref_2`) and detects element roles (textbox, combobox, radio, checkbox, button).
+1. **DOM Read**: Call `browser_snapshot` (or its alias `read_page`) to generate the semantic Accessibility Tree. This creates unique element identifiers (`@e1`, `@e2`, or `ref_1`, `ref_2`) and detects element roles (textbox, combobox, radio, checkbox, button).
 2. **Vision Read**: Call `browser_screenshot` once to observe the overall visual layout, progress indicators, required field asterisks (`*`), validation error banners, and section headers.
 3. Build a mental map connecting visual elements to their corresponding reference IDs.
 
@@ -68,12 +68,11 @@ Job application portals frequently employ behavioral telemetry, bot-detection he
 - Do NOT perform single-field round-trips for standard forms. A single batch should comfortably complete an entire logical section (e.g., Personal Contact Information, Education, or Employment).
 
 #### 2. Human-Like Action Sequences
-For every interactive field, adhere strictly to the following natural sequence:
+For every interactive field, adhere strictly to the natural typing and clicking flow:
 ```
-1. Hover cursor over the field: browser_hover({ element: "@e12" })
-2. Click / focus the element: browser_click({ element: "@e12" })
-3. Type text with simulated cadence: browser_type({ element: "@e12", text: "...", delay: 25 })
-4. Brief natural transition pause (100ms - 250ms): browser_wait({ time: 0.2 })
+1. Click / focus the element: browser_click({ element: "@e12" })
+2. Type text with simulated cadence: browser_type({ element: "@e12", text: "...", delay: 20 })
+3. Brief natural transition pause (50ms - 150ms): browser_wait({ time: 0.1 })
 ```
 
 #### 3. Default to Preference Template References
@@ -82,8 +81,8 @@ For every interactive field, adhere strictly to the following natural sequence:
   - Example: `"${preferences.general.lastName}"`
   - Example: `"${preferences.general.phone.formatted}"`
   - Example: `"${preferences.education[0].institution}"`
-  - Example: `"${preferences.education[0].gpa}"`
-- The MCP server's template resolver will automatically substitute the actual values at runtime.
+  - Example: `"${preferences.education[0].graduationDate}"`
+- The MCP server automatically resolves template paths at runtime. If an optional property is absent from preferences, it resolves to an empty string to prevent raw tokens from being typed into forms.
 - **Direct string override**: If the form demands an unusual date or phone format (e.g. `YYYY/MM/DD` instead of `MM/DD/YYYY`, or unformatted 10 digits `8142065539`), format and supply the string directly.
 
 #### 4. Section Sequencing

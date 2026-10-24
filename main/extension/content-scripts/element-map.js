@@ -13,6 +13,25 @@
   let nextElementIndex = 1;
 
   /**
+   * Prunes stale entries from the element map.
+   */
+  function pruneStaleEntries() {
+    const keys = Object.keys(window.__claudeElementMap);
+    if (keys.length < 500) return;
+    for (const k of keys) {
+      const ref = window.__claudeElementMap[k];
+      if (!ref) {
+        delete window.__claudeElementMap[k];
+        continue;
+      }
+      const el = ref.deref();
+      if (!el || !document.contains(el)) {
+        delete window.__claudeElementMap[k];
+      }
+    }
+  }
+
+  /**
    * Assigns or retrieves a unique reference handle for a DOM node.
    * @param {Element} node
    * @returns {string} e.g. "@e1"
@@ -20,7 +39,7 @@
   window.__registerElementRef = function(node) {
     if (!node || !(node instanceof Element)) return null;
 
-    // Check if node already has an assigned ID
+    // Check if node already has an active, valid assigned ID
     if (node.__autoResumeRefId && window.__claudeElementMap[node.__autoResumeRefId]) {
       const existing = window.__claudeElementMap[node.__autoResumeRefId].deref();
       if (existing === node) {
@@ -28,13 +47,16 @@
       }
     }
 
+    pruneStaleEntries();
+
     const refId = `@e${nextElementIndex++}`;
     node.__autoResumeRefId = refId;
-    window.__claudeElementMap[refId] = new WeakRef(node);
+    const weakRef = new WeakRef(node);
+    window.__claudeElementMap[refId] = weakRef;
 
     // Also support "ref_X" alias for cross-compatibility
-    const aliasId = `ref_${refId.replace('@e', '')}`;
-    window.__claudeElementMap[aliasId] = window.__claudeElementMap[refId];
+    const aliasId = `ref_${refId.slice(2)}`;
+    window.__claudeElementMap[aliasId] = weakRef;
 
     return refId;
   };
@@ -51,7 +73,6 @@
     if (window.__claudeElementMap[refId]) {
       const el = window.__claudeElementMap[refId].deref();
       if (el && document.contains(el)) return el;
-      // Stale reference
       delete window.__claudeElementMap[refId];
     }
 
@@ -60,6 +81,7 @@
     if (alt && window.__claudeElementMap[alt]) {
       const el = window.__claudeElementMap[alt].deref();
       if (el && document.contains(el)) return el;
+      delete window.__claudeElementMap[alt];
     }
 
     // XPath evaluation
@@ -71,15 +93,15 @@
       } catch (e) {}
     }
 
-    // Semantic ARIA role/name selector: role=button[name="Submit"]
-    const roleMatch = refId.match(/^role=([a-zA-Z]+)\[name="([^"]+)"\]$/i) || refId.match(/^([a-zA-Z]+)\s+"([^"]+)"$/);
+    // Semantic ARIA role/name selector: role=button[name="Submit"] or button "Submit"
+    const roleMatch = refId.match(/^role=([a-zA-Z0-9]+)\[name=["']([^"']+)["']\]$/i) || refId.match(/^([a-zA-Z0-9]+)\s+["']([^"']+)["']$/i);
     if (roleMatch) {
       const targetRole = roleMatch[1].toLowerCase();
       const targetName = roleMatch[2].toLowerCase();
-      const candidates = document.querySelectorAll('*');
+      const candidates = Array.from(document.querySelectorAll('*')).reverse(); // bottom-up to match deepest child first
       for (const el of candidates) {
         const role = (el.getAttribute('role') || el.tagName.toLowerCase()).toLowerCase();
-        const text = (el.getAttribute('aria-label') || el.textContent || el.getAttribute('value') || '').trim().toLowerCase();
+        const text = (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('value') || el.textContent || '').trim().toLowerCase();
         if ((role === targetRole || (targetRole === 'button' && el.tagName === 'BUTTON')) && text.includes(targetName)) {
           return el;
         }

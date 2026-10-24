@@ -72,6 +72,25 @@ export const TOOL_CATALOG = [
     }
   },
   {
+    name: "read_page",
+    description: "Alias for browser_snapshot. Extracts an accessibility tree representation of the active page serialized as YAML.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        filter: {
+          type: "string",
+          enum: ["interactive", "all"],
+          description: "Filter level: 'interactive' for buttons, links, and inputs; 'all' for full document structure. Default: 'all'."
+        },
+        depth: {
+          type: "integer",
+          description: "Max traversal depth. Default: 15."
+        },
+        tabId: { type: "integer", description: "Target tab ID." }
+      }
+    }
+  },
+  {
     name: "browser_screenshot",
     description: "Captures a high-resolution PNG screenshot of the visible viewport or full page, returning base64 data and coordinate scaling dimensions.",
     inputSchema: {
@@ -278,7 +297,14 @@ export const TOOL_CATALOG = [
           description: "Element reference ID (e.g. 'ref_1', '@e12')."
         },
         value: {
-          description: "Value to set (string, number, boolean for checkbox). Supports '${preferences.*}' templates."
+          description: "Value to set (string, number, boolean for checkbox). Supports '${preferences.*}' templates.",
+          anyOf: [
+            { type: "string" },
+            { type: "number" },
+            { type: "boolean" },
+            { type: "array" },
+            { type: "object" }
+          ]
         },
         tabId: { type: "integer" }
       },
@@ -478,7 +504,14 @@ export const TOOL_CATALOG = [
           description: "Target section name."
         },
         data: {
-          description: "Data object, array, or value to merge or store."
+          description: "Data object, array, or value to merge or store.",
+          anyOf: [
+            { type: "object" },
+            { type: "array" },
+            { type: "string" },
+            { type: "number" },
+            { type: "boolean" }
+          ]
         },
         overwrite: {
           type: "boolean",

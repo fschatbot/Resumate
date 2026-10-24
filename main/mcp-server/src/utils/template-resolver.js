@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { getPreferenceByPath, resolvePreferenceTemplate } from '../../../preferences/validator.js';
 
 // In-memory preferences state (not preloaded from disk)
 let activePreferences = null;
@@ -64,76 +65,27 @@ export function clearPreferences() {
 }
 
 /**
- * Traverses an object using dot or bracket notation.
- * e.g. "general.phone.formatted" or "education[0].institution"
+ * Traverses an object using dot or bracket notation safely.
  * @param {object} obj
  * @param {string} propPath
  * @returns {any}
  */
 export function getNestedProperty(obj, propPath) {
-  if (!obj || !propPath) return undefined;
-
-  const normalized = propPath
-    .replace(/^preferences\./i, '')
-    .replace(/\[(\w+)\]/g, '.$1')
-    .replace(/^\./, '');
-
-  const segments = normalized.split('.');
-  let curr = obj;
-  for (const seg of segments) {
-    if (curr === null || curr === undefined) return undefined;
-    curr = curr[seg];
-  }
-  return curr;
+  return getPreferenceByPath(obj, propPath);
 }
 
 /**
  * Recursively resolves template placeholders (${preferences.xxx}) inside strings, objects, or arrays.
- * If preferences have not been initialized yet, leaves placeholders intact and logs a warning.
+ * If preferences have not been initialized yet, leaves placeholders intact.
+ * When preferences are active, missing properties resolve to "" to avoid typing raw tokens.
  * @param {any} input
  * @param {object} [overridePrefs]
  * @returns {any}
  */
 export function resolveTemplateVariables(input, overridePrefs = null) {
   const prefs = overridePrefs || activePreferences;
-
   if (!prefs) {
-    // Preferences not yet provided - do not crash, return input intact
     return input;
   }
-
-  if (typeof input === 'string') {
-    // Exact token match: return raw data type if possible
-    const exactMatch = input.trim().match(/^\$\{preferences\.([^}]+)\}$/);
-    if (exactMatch) {
-      const resolved = getNestedProperty(prefs, exactMatch[1]);
-      if (resolved !== undefined) return resolved;
-    }
-
-    // Substring interpolation
-    return input.replace(/\$\{preferences\.([^}]+)\}/g, (match, pathKey) => {
-      const resolved = getNestedProperty(prefs, pathKey);
-      if (resolved === undefined || resolved === null) {
-        return match; // preserve if unresolvable
-      }
-      if (typeof resolved === 'object') {
-        return JSON.stringify(resolved);
-      }
-      return String(resolved);
-    });
-  }
-
-  if (Array.isArray(input)) {
-    return input.map(item => resolveTemplateVariables(item, prefs));
-  }
-
-  if (input !== null && typeof input === 'object') {
-    const output = {};
-    for (const [k, v] of Object.entries(input)) {
-      output[k] = resolveTemplateVariables(v, prefs);
-    }
-    return output;
-  }
-
-  return input;
+  return resolvePreferenceTemplate(input, prefs);
 }

@@ -1,55 +1,49 @@
 /**
  * sidepanel.js - AutoResume Side Panel UI Controller
  *
- * Implements real-time feed rendering with hover tooltips, batched action containers,
- * connection beacon animation state, dynamic user file uploads (no preloaded files),
- * and the inbuilt AI chat wrapper.
+ * Provides real-time tool execution feed, connection beacon monitoring,
+ * dynamic user resume & preferences file uploads, and AI chat interface.
  */
 
-// UI Elements
-const bridgeBadge = document.getElementById('bridgeBadge');
-const bridgeStatusText = document.getElementById('bridgeStatusText');
-const beaconBanner = document.getElementById('beaconBanner');
-const beaconHeading = document.getElementById('beaconHeading');
-const beaconSubtext = document.getElementById('beaconSubtext');
-const radarBeacon = document.querySelector('.radar-beacon');
+// Global State
+let isConnected = false;
+let executionHistory = [];
+let storedFiles = [];
+let activePreferences = null;
 
+// DOM Elements
+const beaconIndicator = document.getElementById('beaconIndicator');
+const beaconText = document.getElementById('beaconText');
+const activeTabPill = document.getElementById('activeTabPill');
 const statToolsCount = document.getElementById('statToolsCount');
-const statTabId = document.getElementById('statTabId');
 const statFilesCount = document.getElementById('statFilesCount');
-
+const statGroupStatus = document.getElementById('statGroupStatus');
 const toolListContainer = document.getElementById('toolListContainer');
-const emptyFeedState = document.getElementById('emptyFeedState');
 const clearFeedBtn = document.getElementById('clearFeedBtn');
-
+const tooltip = document.getElementById('tooltip');
 const filesGridContainer = document.getElementById('filesGridContainer');
-const addFileBtn = document.getElementById('addFileBtn');
+const uploadFileBtn = document.getElementById('uploadFileBtn');
 const realFileInput = document.getElementById('realFileInput');
-
 const navTabs = document.querySelectorAll('.nav-tab');
 const tabPanes = document.querySelectorAll('.tab-pane');
 
-const tooltip = document.getElementById('globalTooltip');
-
-// Inbuilt Chat Elements
-const providerChips = document.querySelectorAll('.provider-chip');
-const apiKeyInput = document.getElementById('apiKeyInput');
-const apiKeyLabel = document.getElementById('apiKeyLabel');
-const modelSelect = document.getElementById('modelSelect');
-const saveProviderBtn = document.getElementById('saveProviderBtn');
+// Chat DOM
+const chatGreeting = document.getElementById('chatGreeting');
 const chatMessages = document.getElementById('chatMessages');
 const chatInputText = document.getElementById('chatInputText');
-const chatSendBtn = document.getElementById('chatSendBtn');
-const startAutofillBtn = document.getElementById('startAutofillBtn');
+const sendChatBtn = document.getElementById('sendChatBtn');
+const autofillCurrentPageBtn = document.getElementById('autofillCurrentPageBtn');
 const verifyPageBtn = document.getElementById('verifyPageBtn');
-const chatGreeting = document.getElementById('chatGreeting');
 
-// Active State
-let currentTabId = null;
-let currentProvider = 'gemini';
-let storedFiles = [];
-let activePreferences = null;
-let executionHistory = [];
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 // ============================================================================
 // Initialization & Tab Navigation
@@ -58,24 +52,26 @@ let executionHistory = [];
 document.addEventListener('DOMContentLoaded', async () => {
   setupNavigationTabs();
   setupTooltip();
-  setupProviderSettings();
-  setupChatHandlers();
-  setupFileUploadHandlers();
+  setupFileUpload();
+  setupChat();
+  setupQuickActions();
+  setupActiveTabButtons();
+
+  // Query background for initial telemetry state and acquire active tab
+  chrome.runtime.sendMessage({ type: "GET_STATE" }, (state) => {
+    if (state) applyTelemetryState(state);
+  });
+
+  // Load dynamically stored files and preferences
   await loadStoredFiles();
+});
 
-  // Query background for current state
-  chrome.runtime.sendMessage({ type: "GET_STATE" }, (res) => {
-    if (res) {
-      applyTelemetryState(res);
-    }
-  });
-
-  // Listen for real-time telemetry updates from background.js
-  chrome.runtime.onMessage.addListener((msg) => {
-    if (msg.type === "TELEMETRY_UPDATE") {
-      applyTelemetryState(msg);
-    }
-  });
+// Listen for telemetry updates broadcast by background.js
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.type === "TELEMETRY_UPDATE") {
+    applyTelemetryState(msg);
+    loadStoredFiles();
+  }
 });
 
 function setupNavigationTabs() {
@@ -94,7 +90,55 @@ function setupNavigationTabs() {
     clearFeedBtn.addEventListener('click', () => {
       executionHistory = [];
       renderToolFeed([]);
+      chrome.runtime.sendMessage({ type: "CLEAR_FEED" });
     });
+  }
+}
+
+function setupActiveTabButtons() {
+  const setActiveBtn = document.getElementById('setActiveTabBtn');
+  const bannerBtn = document.getElementById('setActiveTabBannerBtn');
+  const tabIdStat = document.getElementById('statTabId');
+
+  async function handleSetActiveTab() {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      if (!tab) {
+        alert("Please click on the browser tab you wish to autofill first.");
+        return;
+      }
+
+      chrome.runtime.sendMessage({
+        type: "SET_ACTIVE_TAB",
+        tabId: tab.id
+      }, (res) => {
+        if (res && res.success) {
+          if (tabIdStat) tabIdStat.textContent = `#${res.tabId}`;
+          const beaconSubtext = document.getElementById('beaconSubtext');
+          if (beaconSubtext) {
+            beaconSubtext.textContent = `Target tab locked: "${res.title || tab.title}" (#${res.tabId})`;
+          }
+          const activeTabPill = document.getElementById('activeTabPill');
+          if (activeTabPill) {
+            activeTabPill.textContent = (res.title || tab.title).slice(0, 22);
+            activeTabPill.title = `${res.title || tab.title}\n${res.url || tab.url}`;
+          }
+          alert(`✓ Tab #${res.tabId} ("${res.title || tab.title}") is now locked as the active AutoResume MCP tab.`);
+        } else {
+          alert(`Failed to set active tab: ${res?.error || 'Unknown error'}`);
+        }
+      });
+    } catch (e) {
+      alert(`Error setting active tab: ${e.message}`);
+    }
+  }
+
+  if (setActiveBtn) setActiveBtn.addEventListener('click', handleSetActiveTab);
+  if (bannerBtn) bannerBtn.addEventListener('click', handleSetActiveTab);
+  if (tabIdStat) {
+    tabIdStat.style.cursor = 'pointer';
+    tabIdStat.title = 'Click to lock current tab as active MCP tab';
+    tabIdStat.addEventListener('click', handleSetActiveTab);
   }
 }
 
@@ -105,125 +149,120 @@ function setupNavigationTabs() {
 function applyTelemetryState(state) {
   const { stats, connected, history } = state;
 
-  // Update statistics strip
   if (stats) {
-    statToolsCount.textContent = stats.toolsCalledCount || 0;
-    statTabId.textContent = stats.activeTabId ? `#${stats.activeTabId}` : '--';
-    currentTabId = stats.activeTabId;
+    const toolsCount = document.getElementById('statToolsCount');
+    if (toolsCount) toolsCount.textContent = stats.toolsCalledCount || 0;
+
+    const filesCount = document.getElementById('statFilesCount');
+    if (filesCount) filesCount.textContent = (stats.filesExportedCount || 0) + (stats.filesImportedCount || 0);
+
+    const tabIdStat = document.getElementById('statTabId');
+    if (tabIdStat) {
+      tabIdStat.textContent = stats.activeTabId ? `#${stats.activeTabId}` : '--';
+      if (stats.activeTabTitle) tabIdStat.title = `${stats.activeTabTitle}\n${stats.activeTabUrl}`;
+    }
+
+    const activeTabPill = document.getElementById('activeTabPill');
+    if (activeTabPill) {
+      if (stats.activeTabTitle) {
+        activeTabPill.textContent = stats.activeTabTitle.slice(0, 22) + (stats.activeTabTitle.length > 22 ? '...' : '');
+        activeTabPill.title = `${stats.activeTabTitle}\n${stats.activeTabUrl}`;
+      } else {
+        activeTabPill.textContent = 'No tab isolated';
+      }
+    }
+
+    const beaconSubtext = document.getElementById('beaconSubtext');
+    if (beaconSubtext && stats.activeTabId) {
+      beaconSubtext.textContent = `Target tab: "${stats.activeTabTitle}" (#${stats.activeTabId})`;
+    }
   }
 
-  // Update Bridge Badge
-  if (connected) {
-    bridgeBadge.className = 'status-badge connected';
-    bridgeStatusText.textContent = 'Bridge Online';
-  } else {
-    bridgeBadge.className = 'status-badge waiting';
-    bridgeStatusText.textContent = 'Bridge Waiting';
+  // Update connection badge
+  const bridgeBadge = document.getElementById('bridgeBadge') || document.getElementById('beaconIndicator');
+  const bridgeStatusText = document.getElementById('bridgeStatusText') || document.getElementById('beaconText');
+
+  isConnected = Boolean(connected);
+  if (bridgeBadge && bridgeStatusText) {
+    if (isConnected) {
+      bridgeBadge.className = 'status-badge active';
+      bridgeStatusText.textContent = 'Bridge Connected';
+    } else {
+      bridgeBadge.className = 'status-badge waiting';
+      bridgeStatusText.textContent = 'Bridge Waiting';
+    }
   }
 
-  // Update Beacon Banner Animation
-  if (connected && stats && stats.toolsCalledCount > 0) {
-    radarBeacon.classList.add('active');
-    beaconHeading.textContent = 'AI Agent Active & Connected';
-    beaconSubtext.textContent = `Streaming tool operations to TAB #${stats.activeTabId} in MCP group.`;
-  } else if (connected) {
-    radarBeacon.classList.remove('active');
-    beaconHeading.textContent = 'Bridge Connected — Ready for Commands';
-    beaconSubtext.textContent = 'Waiting for AI agent to send its first request to the TAB group.';
-  } else {
-    radarBeacon.classList.remove('active');
-    beaconHeading.textContent = 'Awaiting AI Agent Request';
-    beaconSubtext.textContent = 'Start desktop MCP bridge (ws://localhost:9001) or use Inbuilt Chat.';
+  const groupStatus = document.getElementById('statGroupStatus');
+  if (groupStatus) {
+    groupStatus.textContent = state.groupId !== null ? 'Isolated' : 'Default';
   }
 
-  // Render Execution Feed
-  if (history) {
+  // Update tool feed
+  if (history && Array.isArray(history)) {
     executionHistory = history;
-    renderToolFeed(history);
+    renderToolFeed(executionHistory);
   }
 }
 
 // ============================================================================
-// Live Tool Feed Rendering
+// Live Execution Feed Rendering
 // ============================================================================
 
 function renderToolFeed(items) {
-  if (!items || items.length === 0) {
-    toolListContainer.innerHTML = '';
-    toolListContainer.appendChild(emptyFeedState);
-    emptyFeedState.style.display = 'flex';
+  toolListContainer.innerHTML = '';
+
+  if (items.length === 0) {
+    const emptyNotice = document.createElement('div');
+    emptyNotice.className = 'empty-feed';
+    emptyNotice.innerHTML = `
+      <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#64748B" stroke-width="1.5">
+        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+      </svg>
+      <p>No tool calls executed yet</p>
+      <span>When an AI agent (Gemini, Claude, Cursor) calls browser automation tools, live actions will appear here in real-time.</span>
+    `;
+    toolListContainer.appendChild(emptyNotice);
     return;
   }
 
-  emptyFeedState.style.display = 'none';
-  toolListContainer.innerHTML = '';
-
   items.forEach(item => {
     const card = document.createElement('div');
-    const isBatch = item.tool === 'browser_batch';
-    card.className = `tool-card ${isBatch ? 'batch-container' : ''}`;
+    card.className = `tool-card ${item.status || 'running'}`;
 
-    // Header: Tool name badge, duration, and status
-    const header = document.createElement('div');
-    header.className = 'tool-card-header';
+    const timestamp = new Date(item.timestamp);
+    const timeStr = timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const fullDate = timestamp.toLocaleString();
 
-    const left = document.createElement('div');
-    left.style.display = 'flex';
-    left.style.alignItems = 'center';
-    left.style.gap = '6px';
-
-    const badge = document.createElement('span');
-    badge.className = 'tool-badge';
-    badge.textContent = item.tool;
-    left.appendChild(badge);
-
-    if (item.duration) {
-      const dur = document.createElement('span');
-      dur.style.fontSize = '10px';
-      dur.style.color = '#94A3B8';
-      dur.textContent = `${item.duration}ms`;
-      left.appendChild(dur);
-    }
-    header.appendChild(left);
-
-    const right = document.createElement('div');
-    right.style.display = 'flex';
-    right.style.alignItems = 'center';
-    right.style.gap = '6px';
-
-    // Hoverable timestamp with tooltip
-    const timeSpan = document.createElement('span');
-    timeSpan.className = 'tool-time';
-    const dateObj = new Date(item.timestamp);
-    timeSpan.textContent = dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    timeSpan.dataset.fullDate = dateObj.toLocaleString();
-    timeSpan.addEventListener('mouseenter', showTooltip);
-    timeSpan.addEventListener('mouseleave', hideTooltip);
-    right.appendChild(timeSpan);
-
-    const pill = document.createElement('span');
-    pill.className = `tool-status-pill ${item.status || 'success'}`;
-    pill.textContent = item.status || 'success';
-    right.appendChild(pill);
-
-    header.appendChild(right);
-    card.appendChild(header);
-
-    // Arguments box (truncated on hover expand)
-    if (item.params && Object.keys(item.params).length > 0) {
-      const argsBox = document.createElement('div');
-      argsBox.className = 'tool-args-box';
-      const jsonStr = JSON.stringify(item.params, null, 2);
-      argsBox.textContent = jsonStr;
-      argsBox.title = "Click to toggle full arguments view";
-      argsBox.addEventListener('click', () => {
-        argsBox.classList.toggle('expanded');
-      });
-      card.appendChild(argsBox);
+    let durationText = '';
+    if (item.duration !== undefined) {
+      durationText = item.duration < 1000 ? `${item.duration}ms` : `${(item.duration / 1000).toFixed(2)}s`;
     }
 
-    // Batched Steps Breakdown
-    if (isBatch && item.params?.actions) {
+    const isBatch = item.tool === 'browser_batch' && item.params?.actions;
+    const batchStepCount = isBatch ? item.params.actions.length : 0;
+
+    card.innerHTML = `
+      <div class="tool-header">
+        <span class="tool-name">${escapeHtml(item.tool)}${isBatch ? ` <small style="color:#A78BFA;">[${batchStepCount} steps]</small>` : ''}</span>
+        <div style="display:flex;align-items:center;">
+          ${durationText ? `<span class="duration-badge">${durationText}</span>` : ''}
+          <span class="tool-time" data-full-date="${escapeHtml(fullDate)}">${timeStr}</span>
+        </div>
+      </div>
+      <div class="tool-body">
+        <pre class="tool-params">${escapeHtml(JSON.stringify(item.params || {}, null, 2))}</pre>
+        ${item.error ? `<div class="error-banner"><strong>Error:</strong> ${escapeHtml(item.error)}</div>` : ''}
+      </div>
+    `;
+
+    // Tooltip for exact timestamp
+    const timeElem = card.querySelector('.tool-time');
+    timeElem.addEventListener('mouseenter', showTooltip);
+    timeElem.addEventListener('mouseleave', hideTooltip);
+
+    // Expandable batch steps container
+    if (isBatch) {
       const stepsList = document.createElement('div');
       stepsList.className = 'batch-steps-list';
 
@@ -238,8 +277,8 @@ function renderToolFeed(items) {
         const stepStatus = stepRes ? stepRes.status : (item.status === 'running' ? 'RUNNING' : 'QUEUED');
 
         stepRow.innerHTML = `
-          <span><strong>${idx + 1}.</strong> ${act.tool} (${Object.keys(act.params || {}).join(', ')})</span>
-          <span class="tool-status-pill ${stepStatus.toLowerCase()}">${stepStatus}</span>
+          <span><strong>${idx + 1}.</strong> ${escapeHtml(act.tool)} (${escapeHtml(Object.keys(act.params || {}).join(', '))})</span>
+          <span class="tool-status-pill ${escapeHtml(stepStatus.toLowerCase())}">${escapeHtml(stepStatus)}</span>
         `;
         stepsList.appendChild(stepRow);
       });
@@ -247,11 +286,10 @@ function renderToolFeed(items) {
       card.appendChild(stepsList);
     }
 
-    // File attachments / Screenshot previews
     if (item.result?.screenshotBase64) {
       const fileLink = document.createElement('a');
       fileLink.className = 'file-link';
-      fileLink.innerHTML = `📷 View Captured Screenshot (${item.result.timestamp || 'PNG'})`;
+      fileLink.textContent = `📷 View Captured Screenshot (${item.result.timestamp || 'PNG'})`;
       fileLink.addEventListener('click', (e) => {
         e.preventDefault();
         openImagePreview(`data:image/png;base64,${item.result.screenshotBase64}`);
@@ -263,7 +301,6 @@ function renderToolFeed(items) {
   });
 }
 
-// Tooltip positioning
 function showTooltip(e) {
   const fullText = e.target.dataset.fullDate;
   if (!fullText) return;
@@ -302,15 +339,15 @@ async function loadStoredFiles() {
 
   if (activePreferences && chatGreeting) {
     const name = activePreferences.general?.fullName || activePreferences.general?.firstName || "Applicant";
-    chatGreeting.innerHTML = `Preferences loaded for <strong>${name}</strong>. Ready to autofill application forms!`;
+    chatGreeting.innerHTML = `Preferences loaded for <strong>${escapeHtml(name)}</strong>. Ready to autofill application forms!`;
   }
 
   renderFilesGrid();
 }
 
-function setupFileUploadHandlers() {
-  if (addFileBtn && realFileInput) {
-    addFileBtn.addEventListener('click', () => {
+function setupFileUpload() {
+  if (uploadFileBtn && realFileInput) {
+    uploadFileBtn.addEventListener('click', () => {
       realFileInput.click();
     });
 
@@ -334,7 +371,6 @@ async function processUserUploadedFile(file) {
     const reader = new FileReader();
 
     if (file.name.endsWith('.json')) {
-      // Preferences or schema JSON
       reader.onload = async (e) => {
         try {
           const parsed = JSON.parse(e.target.result);
@@ -349,21 +385,23 @@ async function processUserUploadedFile(file) {
             uploadedAt: new Date().toISOString()
           };
 
-          chrome.runtime.sendMessage({ type: "USER_UPLOADED_FILE", payload: filePayload });
-
-          if (isPref) {
-            chrome.runtime.sendMessage({ type: "USER_SET_PREFERENCES", payload: parsed });
-            activePreferences = parsed;
-            alert(`Loaded Preferences JSON for: ${parsed.general?.fullName || 'Applicant'}`);
-          }
+          chrome.runtime.sendMessage({ type: "USER_UPLOADED_FILE", payload: filePayload }, () => {
+            if (isPref) {
+              chrome.runtime.sendMessage({ type: "USER_SET_PREFERENCES", payload: parsed }, () => {
+                activePreferences = parsed;
+                resolve();
+              });
+            } else {
+              resolve();
+            }
+          });
         } catch (err) {
           alert(`Failed to parse JSON file '${file.name}': ${err.message}`);
+          resolve();
         }
-        resolve();
       };
       reader.readAsText(file);
     } else {
-      // PDF, Markdown, Word, Text
       reader.onload = (e) => {
         const dataUrl = e.target.result;
         const base64Content = dataUrl.split(',')[1] || '';
@@ -377,8 +415,9 @@ async function processUserUploadedFile(file) {
           uploadedAt: new Date().toISOString()
         };
 
-        chrome.runtime.sendMessage({ type: "USER_UPLOADED_FILE", payload: filePayload });
-        resolve();
+        chrome.runtime.sendMessage({ type: "USER_UPLOADED_FILE", payload: filePayload }, () => {
+          resolve();
+        });
       };
       reader.readAsDataURL(file);
     }
@@ -421,8 +460,8 @@ function renderFilesGrid() {
       <div style="display:flex;align-items:center;">
         <span class="file-icon">${icon}</span>
         <div class="file-details">
-          <div class="file-name">${file.name}</div>
-          <div class="file-meta">${file.size} • ${file.description || 'Uploaded File'}</div>
+          <div class="file-name">${escapeHtml(file.name)}</div>
+          <div class="file-meta">${escapeHtml(file.size)} • ${escapeHtml(file.description || 'Uploaded File')}</div>
         </div>
       </div>
       <div class="file-actions">
@@ -434,86 +473,31 @@ function renderFilesGrid() {
     filesGridContainer.appendChild(card);
   });
 
-  // Attach button actions
   filesGridContainer.querySelectorAll('.preview-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {
       const idx = parseInt(e.target.dataset.index, 10);
-      const file = storedFiles[idx];
-      alert(`Asset: ${file.name}\nSize: ${file.size}\nType: ${file.type}\nUploaded: ${file.uploadedAt || 'Recently'}\n\nThis file is available for web form injection.`);
+      const f = storedFiles[idx];
+      alert(`File: ${f.name}\nType: ${f.type}\nSize: ${f.size}\nDescription: ${f.description || 'N/A'}\nUploaded: ${f.uploadedAt || 'N/A'}`);
     });
   });
 
   filesGridContainer.querySelectorAll('.delete-btn').forEach(btn => {
-    btn.addEventListener('click', (e) => {
+    btn.addEventListener('click', async (e) => {
       const idx = parseInt(e.target.dataset.index, 10);
       storedFiles.splice(idx, 1);
-      chrome.storage.local.set({ files: storedFiles }, () => {
-        loadStoredFiles();
-      });
+      await chrome.storage.local.set({ files: storedFiles });
+      renderFilesGrid();
     });
   });
 }
 
 // ============================================================================
-// Inbuilt AI Chat Wrapper
+// AI Chat Interface & Form Automation
 // ============================================================================
 
-function setupProviderSettings() {
-  providerChips.forEach(chip => {
-    chip.addEventListener('click', () => {
-      providerChips.forEach(c => c.classList.remove('active'));
-      chip.classList.add('active');
-      currentProvider = chip.dataset.provider;
-
-      if (currentProvider === 'gemini') {
-        apiKeyLabel.textContent = 'Gemini API Key';
-        modelSelect.innerHTML = `
-          <option value="gemini-2.0-flash">Gemini 2.0 Flash (Fastest)</option>
-          <option value="gemini-1.5-pro">Gemini 1.5 Pro (Deep Reasoning)</option>
-        `;
-      } else if (currentProvider === 'claude') {
-        apiKeyLabel.textContent = 'Anthropic API Key';
-        modelSelect.innerHTML = `
-          <option value="claude-3-7-sonnet">Claude 3.7 Sonnet (Latest)</option>
-          <option value="claude-3-5-sonnet">Claude 3.5 Sonnet</option>
-          <option value="claude-3-5-haiku">Claude 3.5 Haiku</option>
-        `;
-      } else if (currentProvider === 'openai') {
-        apiKeyLabel.textContent = 'OpenAI API Key';
-        modelSelect.innerHTML = `
-          <option value="gpt-4o">GPT-4o (Multimodal)</option>
-          <option value="gpt-4o-mini">GPT-4o Mini</option>
-        `;
-      } else {
-        apiKeyLabel.textContent = 'Ollama Endpoint URL';
-        apiKeyInput.placeholder = 'http://localhost:11434';
-        modelSelect.innerHTML = `
-          <option value="llama3.2">Llama 3.2</option>
-          <option value="qwen2.5-coder">Qwen 2.5 Coder</option>
-        `;
-      }
-    });
-  });
-
-  saveProviderBtn.addEventListener('click', () => {
-    const key = apiKeyInput.value.trim();
-    const model = modelSelect.value;
-    chrome.storage.local.set({
-      [`provider_${currentProvider}`]: { key, model }
-    }, () => {
-      saveProviderBtn.textContent = 'Connected ✓';
-      setTimeout(() => { saveProviderBtn.textContent = 'Connect Provider'; }, 2000);
-      appendChatMessage('bot', `Connected to ${currentProvider.toUpperCase()} (${model}). Ready for instructions.`);
-    });
-  });
-}
-
-function setupChatHandlers() {
-  if (chatSendBtn) {
-    chatSendBtn.addEventListener('click', sendUserMessage);
-  }
-
-  if (chatInputText) {
+function setupChat() {
+  if (sendChatBtn && chatInputText) {
+    sendChatBtn.addEventListener('click', sendUserMessage);
     chatInputText.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
@@ -521,65 +505,36 @@ function setupChatHandlers() {
       }
     });
   }
+}
 
-  // Quick Action 1: Fill Out This Application
-  if (startAutofillBtn) {
-    startAutofillBtn.addEventListener('click', async () => {
-      // Check if preferences or files have been provided
-      if (!activePreferences && storedFiles.length === 0) {
-        appendChatMessage('user', "🚀 Fill out this application form.");
-        appendChatMessage('bot', `
-          <div style="color:#F59E0B;font-weight:700;">⚠️ No Resume or Preferences Provided</div>
-          <p>Please upload your Resume (.pdf, .md) or Preferences (.json) in the <strong>Files &amp; Resume</strong> tab, or paste your resume text directly into the chat box below so I can extract your preferences first!</p>
-        `);
+function setupQuickActions() {
+  if (autofillCurrentPageBtn) {
+    autofillCurrentPageBtn.addEventListener('click', async () => {
+      if (!activePreferences) {
+        appendChatMessage('bot', "⚠️ Please upload or initialize your preferences/resume before autofilling.");
         return;
       }
-
-      appendChatMessage('user', "🚀 Fill out this job application using my uploaded credentials.");
-      appendChatMessage('bot', "Initiating dual observation pass (DOM snapshot + Screenshot) on the active page...");
+      appendChatMessage('user', "🚀 Autofill the application form on the active page.");
+      appendChatMessage('bot', "Analyzing page form structure and accessibility tree...");
 
       try {
-        const snapRes = await executeToolInTab("browser_snapshot", { filter: "interactive" });
-        await executeToolInTab("browser_screenshot", {});
-
-        appendChatMessage('bot', `
-          <strong>Dual Observation Completed:</strong><br>
-          • Analyzed accessibility tree: <code>${snapRes.interactiveCount || 'detected'}</code> interactive form controls.<br>
-          • Layout & required fields verified.<br><br>
-          <strong>Simulating Human Batch Autofill:</strong><br>
-          Executing compound <code>browser_batch</code> with natural hover-focus-type pauses...
-        `);
-
-        setTimeout(() => {
-          appendChatMessage('bot', `
-            <div style="color:#10B981;font-weight:700;">✓ Form Fields Successfully Populated</div>
-            <br>
-            <strong>Work Completed</strong><br>
-            • Filled contact, education, and experience fields from active preferences.<br>
-            • Injected resume file into application upload field.<br><br>
-            <strong>User Actions Remaining</strong><br>
-            • Review demographic voluntary self-identification disclosures.<br>
-            • Verify attached resume preview.<br>
-            • Click the final <em>"Submit Application"</em> button.
-          `);
-        }, 1200);
-
+        const snap = await executeToolInTab("browser_snapshot", { filter: "interactive" });
+        appendChatMessage('bot', `Found interactive elements on page. Snapshot acquired (${snap.interactiveCount || 0} interactive nodes).`);
       } catch (err) {
-        appendChatMessage('bot', `Error during autofill pass: ${err.message}`);
+        appendChatMessage('bot', `Automation error: ${escapeHtml(err.message)}`);
       }
     });
   }
 
-  // Quick Action 2: Inspect Page Form
   if (verifyPageBtn) {
     verifyPageBtn.addEventListener('click', async () => {
       appendChatMessage('user', "🔍 Inspect the active page form elements.");
       try {
         const snapRes = await executeToolInTab("browser_snapshot", { filter: "interactive" });
         const preview = snapRes.yaml ? snapRes.yaml.slice(0, 500) + '...' : 'Snapshot acquired.';
-        appendChatMessage('bot', `<strong>Accessibility Tree Sample:</strong><pre style="background:rgba(0,0,0,0.3);padding:6px;border-radius:4px;font-size:10px;margin-top:4px;">${preview}</pre>`);
+        appendChatMessage('bot', `<strong>Accessibility Tree Sample:</strong><pre style="background:rgba(0,0,0,0.3);padding:6px;border-radius:4px;font-size:10px;margin-top:4px;">${escapeHtml(preview)}</pre>`);
       } catch (err) {
-        appendChatMessage('bot', `Inspection error: ${err.message}`);
+        appendChatMessage('bot', `Inspection error: ${escapeHtml(err.message)}`);
       }
     });
   }
@@ -589,25 +544,23 @@ function sendUserMessage() {
   const text = chatInputText.value.trim();
   if (!text) return;
   chatInputText.value = '';
-  appendChatMessage('user', text);
+  appendChatMessage('user', escapeHtml(text));
 
-  // If user pasted a resume or JSON
   if (text.startsWith('{') && text.endsWith('}')) {
     try {
       const parsed = JSON.parse(text);
       if (parsed.general || parsed.education) {
         chrome.runtime.sendMessage({ type: "USER_SET_PREFERENCES", payload: parsed });
         activePreferences = parsed;
-        appendChatMessage('bot', `Received and validated your preferences JSON for: <strong>${parsed.general?.fullName || 'Applicant'}</strong>. Template substitutions are now active!`);
+        appendChatMessage('bot', `Received and validated preferences JSON for: <strong>${escapeHtml(parsed.general?.fullName || 'Applicant')}</strong>.`);
         return;
       }
     } catch (e) {}
   }
 
-  // General response
   setTimeout(() => {
-    appendChatMessage('bot', `Received instruction: "${text}". Applying to active page according to preferences.`);
-  }, 600);
+    appendChatMessage('bot', `Received instruction: "${escapeHtml(text)}". Ready to execute actions via MCP bridge.`);
+  }, 400);
 }
 
 function appendChatMessage(sender, htmlContent) {

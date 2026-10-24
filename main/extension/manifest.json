@@ -4,13 +4,17 @@
   "version": "1.0.0",
   "description": "Autonomous browser agent for job applications with Model Context Protocol (MCP) bridge, live execution feed, and sidepanel wrapper.",
   "icons": {
-    "16": "icons/icon.svg",
-    "48": "icons/icon.svg",
-    "128": "icons/icon.svg"
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
   },
   "action": {
     "default_title": "AutoResume AI Side Panel",
-    "default_icon": "icons/icon.svg"
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
   },
   "background": {
     "service_worker": "background.js",
@@ -58,10 +62,10 @@
   "commands": {
     "_execute_action": {
       "suggested_key": {
-        "default": "Alt+A",
-        "mac": "Command+Shift+A"
+        "default": "Ctrl+Shift+U",
+        "mac": "Command+Shift+U"
       },
-      "description": "Toggle AutoResume side panel"
+      "description": "Toggle AutoResume sidepanel"
     }
   }
 }
