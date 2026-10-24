@@ -1,0 +1,130 @@
+{
+  "name": "browser_batch",
+  "arguments": {
+    "stopOnError": true,
+    "actions": [
+      {
+        "tool": "browser_hover",
+        "params": { "element": "@e10" }
+      },
+      {
+        "tool": "browser_click",
+        "params": { "element": "@e10" }
+      },
+      {
+        "tool": "browser_type",
+        "params": {
+          "element": "@e10",
+          "text": "${preferences.general.firstName}",
+          "clearValue": true,
+          "delay": 35
+        }
+      },
+      {
+        "tool": "browser_wait",
+        "params": { "time": 0.2 }
+      },
+      {
+        "tool": "browser_hover",
+        "params": { "element": "@e11" }
+      },
+      {
+        "tool": "browser_click",
+        "params": { "element": "@e11" }
+      },
+      {
+        "tool": "browser_type",
+        "params": {
+          "element": "@e11",
+          "text": "${preferences.general.lastName}",
+          "clearValue": true,
+          "delay": 35
+        }
+      },
+      {
+        "tool": "browser_wait",
+        "params": { "time": 0.2 }
+      },
+      {
+        "tool": "browser_hover",
+        "params": { "element": "@e12" }
+      },
+      {
+        "tool": "browser_click",
+        "params": { "element": "@e12" }
+      },
+      {
+        "tool": "browser_type",
+        "params": {
+          "element": "@e12",
+          "text": "${preferences.general.email}",
+          "clearValue": true,
+          "delay": 25
+        }
+      },
+      {
+        "tool": "browser_wait",
+        "params": { "time": 0.2 }
+      },
+      {
+        "tool": "browser_hover",
+        "params": { "element": "@e13" }
+      },
+      {
+        "tool": "browser_click",
+        "params": { "element": "@e13" }
+      },
+      {
+        "tool": "browser_type",
+        "params": {
+          "element": "@e13",
+          "text": "${preferences.general.phone.formatted}",
+          "clearValue": true,
+          "delay": 30
+        }
+      },
+      {
+        "tool": "browser_wait",
+        "params": { "time": 0.2 }
+      },
+      {
+        "tool": "browser_hover",
+        "params": { "element": "@e14" }
+      },
+      {
+        "tool": "browser_click",
+        "params": { "element": "@e14" }
+      },
+      {
+        "tool": "browser_type",
+        "params": {
+          "element": "@e14",
+          "text": "${preferences.general.links.linkedin}",
+          "clearValue": true,
+          "delay": 20
+        }
+      },
+      {
+        "tool": "browser_wait",
+        "params": { "time": 0.2 }
+      },
+      {
+        "tool": "browser_hover",
+        "params": { "element": "@e15" }
+      },
+      {
+        "tool": "browser_click",
+        "params": { "element": "@e15" }
+      },
+      {
+        "tool": "browser_type",
+        "params": {
+          "element": "@e15",
+          "text": "${preferences.general.links.github}",
+          "clearValue": true,
+          "delay": 20
+        }
+      }
+    ]
+  }
+}

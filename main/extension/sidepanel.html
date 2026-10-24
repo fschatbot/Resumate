@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AutoResume - Browser MCP Side Panel</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <div class="panel-container">
+    <!-- Header -->
+    <header class="panel-header">
+      <div class="brand">
+        <div class="logo-icon">
+          <svg width="22" height="22" viewBox="0 0 128 128">
+            <rect width="128" height="128" rx="28" fill="#6366F1"/>
+            <path d="M40 28 H72 L92 48 V100 H40 Z" fill="#FFF"/>
+            <circle cx="94" cy="94" r="16" fill="#38BDF8"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1>AutoResume</h1>
+          <span class="version-tag">MCP 1.0</span>
+        </div>
+      </div>
+      <div class="header-actions">
+        <span id="bridgeBadge" class="status-badge waiting">
+          <span class="beacon-dot"></span>
+          <span id="bridgeStatusText">Bridge Waiting</span>
+        </span>
+      </div>
+    </header>
+
+    <!-- Beacon Animation Bar -->
+    <section class="beacon-banner" id="beaconBanner">
+      <div class="radar-beacon">
+        <div class="radar-ring r1"></div>
+        <div class="radar-ring r2"></div>
+        <div class="radar-core"></div>
+      </div>
+      <div class="beacon-info">
+        <strong id="beaconHeading">Awaiting AI Agent Request</strong>
+        <p id="beaconSubtext">Waiting for AI agent to send its first request to the TAB group.</p>
+      </div>
+    </section>
+
+    <!-- Top Statistics Strip -->
+    <section class="stats-strip">
+      <div class="stat-card">
+        <span class="stat-label">Tools Called</span>
+        <span class="stat-value" id="statToolsCount">0</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-label">Active Tab</span>
+        <span class="stat-value" id="statTabId">--</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-label">Files Stored</span>
+        <span class="stat-value" id="statFilesCount">0</span>
+      </div>
+    </section>
+
+    <!-- Tab Navigation -->
+    <nav class="nav-tabs">
+      <button class="nav-tab active" data-tab="feedTab">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+        Live Tool Feed
+      </button>
+      <button class="nav-tab" data-tab="filesTab">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+        Files &amp; Resume
+      </button>
+      <button class="nav-tab" data-tab="chatTab">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+        Inbuilt AI Chat
+      </button>
+      <button class="nav-tab" data-tab="settingsTab">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        Settings
+      </button>
+    </nav>
+
+    <!-- Tab 1: Live Tool Feed -->
+    <main class="tab-pane active" id="feedTab">
+      <div class="feed-controls">
+        <span class="feed-title">Active Page Executions</span>
+        <button id="clearFeedBtn" class="btn-ghost" title="Clear log">Clear</button>
+      </div>
+      <div class="tool-list" id="toolListContainer">
+        <div class="empty-feed" id="emptyFeedState">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#94A3B8" stroke-width="1.5"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+          <p>No tools executed yet on this page.</p>
+          <span>Tools called by AI Agent or Inbuilt Chat will appear live below.</span>
+        </div>
+      </div>
+    </main>
+
+    <!-- Tab 2: Extension Internal Files Storage -->
+    <main class="tab-pane" id="filesTab">
+      <div class="files-header">
+        <div>
+          <h3>User Application Files</h3>
+          <p class="section-desc">Upload your Resume (.pdf, .md) or Preferences (.json). Files are dynamically relayed to the AI agent and injected into web forms.</p>
+        </div>
+        <div>
+          <input type="file" id="realFileInput" style="display: none;" accept=".pdf,.md,.json,.txt" multiple />
+          <button id="addFileBtn" class="btn-primary-small">+ Upload File</button>
+        </div>
+      </div>
+
+      <div class="files-grid" id="filesGridContainer">
+        <!-- Rendered by JS -->
+      </div>
+    </main>
+
+    <!-- Tab 3: Inbuilt AI Wrapper -->
+    <main class="tab-pane" id="chatTab">
+      <!-- Provider Selection Banner -->
+      <div class="provider-banner" id="providerBanner">
+        <div class="provider-selection-title">Connect AI Provider</div>
+        <p class="section-desc">Select an AI model to run the AutoResume skill directly inside this browser tab without external software.</p>
+        <div class="provider-buttons">
+          <button class="provider-chip active" data-provider="gemini">
+            <span class="chip-dot gemini"></span> Gemini
+          </button>
+          <button class="provider-chip" data-provider="claude">
+            <span class="chip-dot claude"></span> Claude
+          </button>
+          <button class="provider-chip" data-provider="openai">
+            <span class="chip-dot openai"></span> OpenAI
+          </button>
+          <button class="provider-chip" data-provider="general">
+            <span class="chip-dot general"></span> Ollama / Local
+          </button>
+        </div>
+
+        <div class="provider-config-box">
+          <div class="input-row">
+            <label for="apiKeyInput" id="apiKeyLabel">Gemini API Key</label>
+            <input type="password" id="apiKeyInput" placeholder="Enter API Key (stored locally)" />
+          </div>
+          <div class="input-row">
+            <label for="modelSelect">Model</label>
+            <select id="modelSelect">
+              <option value="gemini-2.0-flash">Gemini 2.0 Flash (Fastest)</option>
+              <option value="gemini-1.5-pro">Gemini 1.5 Pro (Deep Reasoning)</option>
+            </select>
+          </div>
+          <button id="saveProviderBtn" class="btn-primary">Connect Provider</button>
+        </div>
+      </div>
+
+      <!-- Live Chat Interface -->
+      <div class="chat-container" id="chatContainer">
+        <div class="chat-messages" id="chatMessages">
+          <div class="chat-msg bot">
+            <div class="msg-avatar">🤖</div>
+            <div class="msg-body">
+              <strong>AutoResume Agent</strong>
+              <p id="chatGreeting">Hello! Upload your Resume (.pdf, .md) or Preferences (.json) in the <strong>Files &amp; Resume</strong> tab, or paste your resume text here to begin.</p>
+              <div class="quick-actions">
+                <button class="action-btn" id="startAutofillBtn">🚀 Fill Out This Application</button>
+                <button class="action-btn" id="verifyPageBtn">🔍 Inspect Page Form</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="chat-input-bar">
+          <textarea id="chatInputText" rows="1" placeholder="Paste resume, answer questions, or issue instructions..."></textarea>
+          <button id="chatSendBtn" class="btn-send">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+          </button>
+        </div>
+      </div>
+    </main>
+
+    <!-- Tab 4: Settings -->
+    <main class="tab-pane" id="settingsTab">
+      <div class="settings-group">
+        <h3>Desktop MCP Bridge Connection</h3>
+        <p class="section-desc">Connects this browser extension with desktop agents like Claude Desktop, Cursor, or agy.</p>
+        <div class="input-row">
+          <label for="wsPortInput">WebSocket Port</label>
+          <input type="number" id="wsPortInput" value="9001" />
+        </div>
+        <button id="reconnectWsBtn" class="btn-secondary">Reconnect Bridge</button>
+      </div>
+
+      <div class="settings-group">
+        <h3>Behavior &amp; Simulation Options</h3>
+        <label class="toggle-row">
+          <span>Human Typing Simulation (20-40ms key delay)</span>
+          <input type="checkbox" id="humanTypingToggle" checked />
+        </label>
+        <label class="toggle-row">
+          <span>Visual Highlighting Overlay on Form Fields</span>
+          <input type="checkbox" id="visualOverlayToggle" checked />
+        </label>
+        <label class="toggle-row">
+          <span>Stop Batch on First Step Error (Fail-Fast)</span>
+          <input type="checkbox" id="failFastToggle" checked />
+        </label>
+      </div>
+    </main>
+
+    <!-- Tooltip Element -->
+    <div class="floating-tooltip" id="globalTooltip"></div>
+  </div>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>

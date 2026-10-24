@@ -1,0 +1,27 @@
+{
+  "name": "autoresume-mcp",
+  "version": "1.0.0",
+  "description": "AutoResume MCP Tool - Browser Automation Bridge and Job Application Engine",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "autoresume-mcp": "./src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node test/test-server.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "browser-automation",
+    "resume",
+    "job-application"
+  ],
+  "author": "Himanshu Sultania",
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  }
+}

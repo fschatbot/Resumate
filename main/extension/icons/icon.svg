@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4F46E5" />
+      <stop offset="50%" stop-color="#7C3AED" />
+      <stop offset="100%" stop-color="#9333EA" />
+    </linearGradient>
+    <linearGradient id="sparkGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8" />
+      <stop offset="100%" stop-color="#818CF8" />
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+
+  <!-- Background rounded card -->
+  <rect x="8" y="8" width="112" height="112" rx="24" fill="url(#bgGrad)" filter="url(#shadow)" />
+
+  <!-- Document / Resume Shape -->
+  <path d="M34 26 C34 22.686 36.686 20 40 20 H68 L88 40 V100 C88 103.314 85.314 106 82 106 H40 C36.686 106 34 103.314 34 100 Z" fill="#FFFFFF" fill-opacity="0.95" />
+  
+  <!-- Folded Corner -->
+  <path d="M68 20 V38 C68 39.105 68.895 40 70 40 H88 Z" fill="#E2E8F0" />
+
+  <!-- Resume Profile Circle -->
+  <circle cx="48" cy="42" r="7" fill="#6366F1" />
+
+  <!-- Resume Text Lines -->
+  <rect x="60" y="38" width="18" height="3.5" rx="1.75" fill="#94A3B8" />
+  <rect x="60" y="44" width="12" height="3" rx="1.5" fill="#CBD5E1" />
+
+  <rect x="42" y="56" width="38" height="3" rx="1.5" fill="#64748B" />
+  <rect x="42" y="63" width="32" height="3" rx="1.5" fill="#94A3B8" />
+  <rect x="42" y="70" width="36" height="3" rx="1.5" fill="#94A3B8" />
+  <rect x="42" y="77" width="26" height="3" rx="1.5" fill="#CBD5E1" />
+
+  <!-- Form Checkbox with Checkmark -->
+  <rect x="42" y="86" width="10" height="10" rx="2" fill="#10B981" />
+  <path d="M44.5 91 L46.5 93 L49.5 88.5" stroke="#FFFFFF" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+
+  <rect x="56" y="89.5" width="22" height="3" rx="1.5" fill="#64748B" />
+
+  <!-- Automation Sparkle / Lightning Badge -->
+  <circle cx="94" cy="94" r="18" fill="url(#sparkGrad)" filter="url(#shadow)" />
+  <path d="M95 82 L86 94 H94 L93 106 L102 94 H94 Z" fill="#FFFFFF" />
+</svg>

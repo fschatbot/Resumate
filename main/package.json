@@ -1,0 +1,23 @@
+{
+  "name": "autoresume",
+  "version": "1.0.0",
+  "description": "AutoResume - Model Context Protocol (MCP) Browser Automation & Job Application Engine",
+  "main": "mcp-server/src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node mcp-server/src/index.js",
+    "mcp": "node mcp-server/src/index.js",
+    "validate:prefs": "node -e \"import('./preferences/validator.js').then(m => { const fs = await import('fs'); const pref = JSON.parse(fs.readFileSync('./preferences/preference.json', 'utf8')); console.log(m.validatePreferences(pref)); })\""
+  },
+  "keywords": [
+    "mcp",
+    "browser-automation",
+    "job-application",
+    "chrome-extension",
+    "ai-agent",
+    "claude-desktop",
+    "gemini"
+  ],
+  "author": "Himanshu Sultania",
+  "license": "MIT"
+}

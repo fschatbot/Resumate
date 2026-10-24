@@ -1,0 +1,67 @@
+{
+  "manifest_version": 3,
+  "name": "AutoResume - Browser MCP Automation",
+  "version": "1.0.0",
+  "description": "Autonomous browser agent for job applications with Model Context Protocol (MCP) bridge, live execution feed, and sidepanel wrapper.",
+  "icons": {
+    "16": "icons/icon.svg",
+    "48": "icons/icon.svg",
+    "128": "icons/icon.svg"
+  },
+  "action": {
+    "default_title": "AutoResume AI Side Panel",
+    "default_icon": "icons/icon.svg"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "permissions": [
+    "sidePanel",
+    "storage",
+    "activeTab",
+    "scripting",
+    "debugger",
+    "tabGroups",
+    "tabs",
+    "webNavigation",
+    "downloads",
+    "unlimitedStorage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": [
+        "content-scripts/element-map.js",
+        "content-scripts/accessibility-tree.js",
+        "content-scripts/dom-interactor.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "icons/*",
+        "content-scripts/*"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+A",
+        "mac": "Command+Shift+A"
+      },
+      "description": "Toggle AutoResume side panel"
+    }
+  }
+}

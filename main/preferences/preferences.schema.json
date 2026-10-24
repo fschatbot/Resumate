@@ -1,0 +1,239 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "JobApplicationPreferences",
+  "description": "Standardized schema for AI-assisted job application form filling and applicant preferences.",
+  "type": "object",
+  "required": [
+    "general",
+    "education",
+    "experience",
+    "projects",
+    "skills"
+  ],
+  "properties": {
+    "general": {
+      "type": "object",
+      "description": "General applicant identity, contact information, and preferences.",
+      "required": ["firstName", "lastName", "fullName", "email", "phone"],
+      "properties": {
+        "firstName": { "type": "string", "description": "Legal first name" },
+        "lastName": { "type": "string", "description": "Legal last name" },
+        "fullName": { "type": "string", "description": "Full display name" },
+        "preferredName": { "type": "string", "description": "Preferred nickname or calling name" },
+        "email": { "type": "string", "format": "email", "description": "Primary contact email address" },
+        "phone": {
+          "type": "object",
+          "required": ["countryCode", "digits10", "formatted"],
+          "properties": {
+            "countryCode": { "type": "string", "description": "Phone country dialing code (e.g. '+1')" },
+            "digits10": { "type": "string", "pattern": "^[0-9]{10}$", "description": "10-digit national telephone number" },
+            "formatted": { "type": "string", "description": "Full formatted phone number, e.g. '+1 (814) 206-5539'" }
+          }
+        },
+        "address": {
+          "type": "object",
+          "properties": {
+            "street": { "type": "string" },
+            "city": { "type": "string" },
+            "state": { "type": "string" },
+            "postalCode": { "type": "string" },
+            "country": { "type": "string" }
+          }
+        },
+        "preferredLocations": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "List of preferred job locations, cities, or 'Remote'"
+        },
+        "preferredStartDate": {
+          "type": "string",
+          "description": "Earliest available start date (e.g. 'May 2026' or 'Immediate')"
+        },
+        "knownLanguages": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["language", "proficiency"],
+            "properties": {
+              "language": { "type": "string" },
+              "proficiency": {
+                "type": "string",
+                "enum": ["Native", "Fluent", "Professional", "Intermediate", "Basic"]
+              }
+            }
+          }
+        },
+        "links": {
+          "type": "object",
+          "properties": {
+            "linkedin": { "type": "string", "format": "uri" },
+            "github": { "type": "string", "format": "uri" },
+            "portfolio": { "type": "string", "format": "uri" },
+            "twitter": { "type": "string", "format": "uri" }
+          }
+        }
+      }
+    },
+    "education": {
+      "type": "array",
+      "description": "Educational history and academic credentials.",
+      "items": {
+        "type": "object",
+        "required": ["institution", "degree", "major", "graduationDate"],
+        "properties": {
+          "institution": { "type": "string", "description": "University or college name" },
+          "location": { "type": "string", "description": "Campus city, state, or country" },
+          "degree": { "type": "string", "description": "Degree type, e.g. 'Bachelor of Science (B.S.)'" },
+          "major": { "type": "string", "description": "Primary academic major or discipline" },
+          "minor": { "type": "string", "description": "Academic minor if applicable" },
+          "startDate": { "type": "string", "description": "Matriculation date" },
+          "graduationDate": { "type": "string", "description": "Graduation or expected completion date" },
+          "gpa": { "type": "string", "description": "Grade Point Average (e.g. '4.0')" },
+          "maxGpa": { "type": "string", "description": "Grading scale maximum (e.g. '4.0')" },
+          "relevantCoursework": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "List of key academic courses taken"
+          },
+          "awards": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Academic honors, Dean's list, or scholarships"
+          },
+          "pointers": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Key bullet points summarizing educational highlights"
+          }
+        }
+      }
+    },
+    "awards": {
+      "type": "array",
+      "description": "Honors, hackathons, CTF rankings, and academic awards.",
+      "items": {
+        "type": "object",
+        "required": ["title"],
+        "properties": {
+          "title": { "type": "string", "description": "Award title" },
+          "issuer": { "type": "string", "description": "Issuing organization or competition" },
+          "date": { "type": "string", "description": "Date or year received" },
+          "description": { "type": "string", "description": "Summary of achievement" },
+          "pointers": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    },
+    "experience": {
+      "type": "array",
+      "description": "Professional employment and internships.",
+      "items": {
+        "type": "object",
+        "required": ["company", "role", "startDate"],
+        "properties": {
+          "company": { "type": "string", "description": "Employer name" },
+          "role": { "type": "string", "description": "Official job title" },
+          "location": { "type": "string", "description": "Office location or 'Remote'" },
+          "startDate": { "type": "string", "description": "Employment start date" },
+          "endDate": { "type": "string", "description": "Employment end date or 'Present'" },
+          "isCurrent": { "type": "boolean", "description": "Whether applicant currently holds this position" },
+          "description": { "type": "string", "description": "Overview of responsibilities" },
+          "technologies": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "pointers": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Detailed bullet points describing contributions and impact"
+          }
+        }
+      }
+    },
+    "projects": {
+      "type": "array",
+      "description": "Notable technical projects, open-source work, and research.",
+      "items": {
+        "type": "object",
+        "required": ["title", "technologies"],
+        "properties": {
+          "title": { "type": "string", "description": "Project title" },
+          "technologies": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Languages, frameworks, and libraries used"
+          },
+          "startDate": { "type": "string" },
+          "endDate": { "type": "string" },
+          "description": { "type": "string" },
+          "metrics": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Quantitative benchmarks and accomplishments"
+          },
+          "links": {
+            "type": "object",
+            "properties": {
+              "repo": { "type": "string", "format": "uri" },
+              "demo": { "type": "string", "format": "uri" }
+            }
+          },
+          "pointers": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Detailed bullet points summarizing project achievements"
+          }
+        }
+      }
+    },
+    "skills": {
+      "type": "object",
+      "description": "Technical and domain skills organized by category.",
+      "required": ["languagesByProficiency", "toolsAndFrameworks", "developerToolsAndInfra"],
+      "properties": {
+        "languagesByProficiency": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Programming languages listed in descending order of proficiency"
+        },
+        "toolsAndFrameworks": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Web and machine learning frameworks, UI libraries, etc."
+        },
+        "developerToolsAndInfra": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Databases, cloud platforms, DevOps, and developer tooling"
+        },
+        "domains": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Specialized domain knowledge (e.g. AI/ML, Compilers, Cyber Security)"
+        }
+      }
+    },
+    "demographicsAndLegal": {
+      "type": "object",
+      "description": "Standard work authorization and voluntary demographic disclosures.",
+      "properties": {
+        "legallyAuthorizedToWork": { "type": "boolean" },
+        "requiresVisaSponsorship": { "type": "boolean" },
+        "willRequireFutureSponsorship": { "type": "boolean" },
+        "workAuthorizationType": { "type": "string", "description": "e.g. 'F-1 (OPT/CPT eligible)', 'US Citizen', 'Permanent Resident'" },
+        "isOver18": { "type": "boolean" },
+        "veteranStatus": { "type": "string", "description": "e.g. 'Not a protected veteran' or 'I decline to state'" },
+        "disabilityStatus": { "type": "string", "description": "e.g. 'No, I do not have a disability' or 'I decline to state'" },
+        "gender": { "type": "string" },
+        "raceOrEthnicity": { "type": "string" }
+      }
+    },
+    "customQA": {
+      "type": "object",
+      "description": "Key-value store of common application questionnaire answers.",
+      "additionalProperties": { "type": "string" }
+    }
+  }
+}
