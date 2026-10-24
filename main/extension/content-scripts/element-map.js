@@ -25,7 +25,7 @@
         continue;
       }
       const el = ref.deref();
-      if (!el || !document.contains(el)) {
+      if (!el || !el.isConnected) {
         delete window.__claudeElementMap[k];
       }
     }
@@ -42,7 +42,7 @@
     // Check if node already has an active, valid assigned ID
     if (node.__autoResumeRefId && window.__claudeElementMap[node.__autoResumeRefId]) {
       const existing = window.__claudeElementMap[node.__autoResumeRefId].deref();
-      if (existing === node) {
+      if (existing === node && existing.isConnected) {
         return node.__autoResumeRefId;
       }
     }
@@ -63,25 +63,29 @@
 
   /**
    * Dereferences an element reference handle.
+   * Supports Shadow DOM elements via .isConnected.
    * @param {string} refId - e.g. "@e12", "ref_12", or standard selector
    * @returns {Element|null}
    */
   window.__getElementByRef = function(refId) {
     if (!refId || typeof refId !== 'string') return null;
 
+    const alt = refId.startsWith('@e') ? `ref_${refId.slice(2)}` : (refId.startsWith('ref_') ? `@e${refId.slice(4)}` : null);
+
     // Direct lookup in element map
     if (window.__claudeElementMap[refId]) {
       const el = window.__claudeElementMap[refId].deref();
-      if (el && document.contains(el)) return el;
+      if (el && el.isConnected) return el;
       delete window.__claudeElementMap[refId];
+      if (alt) delete window.__claudeElementMap[alt];
     }
 
-    // Try without '@' or with '@'
-    const alt = refId.startsWith('@e') ? `ref_${refId.slice(2)}` : (refId.startsWith('ref_') ? `@e${refId.slice(4)}` : null);
+    // Try alternate format
     if (alt && window.__claudeElementMap[alt]) {
       const el = window.__claudeElementMap[alt].deref();
-      if (el && document.contains(el)) return el;
+      if (el && el.isConnected) return el;
       delete window.__claudeElementMap[alt];
+      delete window.__claudeElementMap[refId];
     }
 
     // XPath evaluation
@@ -98,12 +102,24 @@
     if (roleMatch) {
       const targetRole = roleMatch[1].toLowerCase();
       const targetName = roleMatch[2].toLowerCase();
-      const candidates = Array.from(document.querySelectorAll('*')).reverse(); // bottom-up to match deepest child first
+      const candidates = Array.from(document.querySelectorAll('*')).reverse();
       for (const el of candidates) {
-        const role = (el.getAttribute('role') || el.tagName.toLowerCase()).toLowerCase();
-        const text = (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('value') || el.textContent || '').trim().toLowerCase();
-        if ((role === targetRole || (targetRole === 'button' && el.tagName === 'BUTTON')) && text.includes(targetName)) {
-          return el;
+        const rawRole = (el.getAttribute('role') || '').toLowerCase();
+        const tag = el.tagName.toLowerCase();
+        let matchesRole = (rawRole === targetRole);
+        if (!matchesRole) {
+          if (targetRole === 'button' && (tag === 'button' || (tag === 'input' && ['button', 'submit', 'reset'].includes(el.type)))) matchesRole = true;
+          if (targetRole === 'link' && tag === 'a') matchesRole = true;
+          if (targetRole === 'textbox' && (tag === 'textarea' || (tag === 'input' && !['checkbox', 'radio', 'button', 'submit', 'reset', 'file'].includes(el.type)))) matchesRole = true;
+          if (targetRole === 'combobox' && tag === 'select') matchesRole = true;
+          if (targetRole === 'checkbox' && tag === 'input' && el.type === 'checkbox') matchesRole = true;
+          if (targetRole === 'radio' && tag === 'input' && el.type === 'radio') matchesRole = true;
+        }
+        if (matchesRole) {
+          const text = (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('value') || el.textContent || '').trim().toLowerCase();
+          if (text.includes(targetName)) {
+            return el;
+          }
         }
       }
     }

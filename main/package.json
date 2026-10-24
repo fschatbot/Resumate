@@ -18,5 +18,9 @@
     "gemini"
   ],
   "author": "AutoResume Team",
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  }
 }

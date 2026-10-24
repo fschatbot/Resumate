@@ -41,7 +41,7 @@
     if (tag === 'TEXTAREA') return 'textbox';
     if (tag === 'INPUT') {
       const type = (el.getAttribute('type') || 'text').toLowerCase();
-      if (['text', 'email', 'tel', 'url', 'password', 'search', 'number'].includes(type)) return 'textbox';
+      if (['text', 'email', 'tel', 'url', 'password', 'search', 'number', 'date', 'time', 'datetime-local', 'month', 'week', 'range', 'color'].includes(type)) return 'textbox';
       if (type === 'checkbox') return 'checkbox';
       if (type === 'radio') return 'radio';
       if (['button', 'submit', 'reset'].includes(type)) return 'button';
@@ -193,6 +193,7 @@
     function traverse(node, depth) {
       if (!node || depth > maxDepth) return;
       if (IGNORED_TAGS.has(node.tagName)) return;
+      if (node.hidden || node.getAttribute('aria-hidden') === 'true') return;
 
       const style = window.getComputedStyle ? window.getComputedStyle(node) : null;
       if (style && (style.display === 'none' || style.visibility === 'hidden')) return;

@@ -94,11 +94,24 @@
     if (char === ' ') return 'Space';
     if (char === '\n' || char === '\r') return 'Enter';
     if (char === '\t') return 'Tab';
+    if (char === '@') return 'Digit2';
+    if (char === '.') return 'Period';
+    if (char === ',') return 'Comma';
+    if (char === '-') return 'Minus';
+    if (char === '_') return 'Minus';
+    if (char === '+') return 'Equal';
+    if (char === '=') return 'Equal';
+    if (char === '/') return 'Slash';
+    if (char === ':') return 'Semicolon';
+    if (char === ';') return 'Semicolon';
+    if (char === '(') return 'Digit9';
+    if (char === ')') return 'Digit0';
     return 'Unidentified';
   }
 
   /**
    * Dispatches realistic synthetic mouse click events and native action.
+   * Ensures handlers do not fire twice.
    * @param {Element} target
    * @param {string} [button="left"]
    * @param {number} [clickCount=1]
@@ -144,15 +157,20 @@
 
     target.dispatchEvent(new PointerEvent('pointerup', mouseOpts));
     target.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
-    target.dispatchEvent(new MouseEvent('click', mouseOpts));
 
-    // For buttons, links, checkboxes, radios, trigger native .click() to ensure forms submit / checkboxes toggle
     const tag = target.tagName.toUpperCase();
-    const isInteractiveTag = ['BUTTON', 'A', 'INPUT'].includes(tag) || target.hasAttribute('role');
+    const isInteractiveTag = ['BUTTON', 'A', 'INPUT', 'SELECT'].includes(tag) || target.hasAttribute('role');
+
+    // Trigger click: use native .click() for form inputs/buttons to invoke browser default action
+    // and click handlers without double-invoking
     if (button === 'left' && isInteractiveTag && typeof target.click === 'function') {
       try {
         target.click();
-      } catch (e) {}
+      } catch (e) {
+        target.dispatchEvent(new MouseEvent('click', mouseOpts));
+      }
+    } else {
+      target.dispatchEvent(new MouseEvent('click', mouseOpts));
     }
 
     if (button === 'right') {
@@ -317,21 +335,29 @@
       throw new Error(`Element '${refId}' not found.`);
     }
 
+    if (!Array.isArray(filesPayload) || filesPayload.length === 0) {
+      throw new Error("No files provided in filesPayload.");
+    }
+
     const dt = new DataTransfer();
 
     for (const f of filesPayload) {
       const mime = f.mimeType || (f.name.endsWith('.pdf') ? 'application/pdf' : 'text/plain');
-      let blob;
 
-      if (f.data) {
-        // Strip data URI scheme prefix if present
-        const base64Clean = f.data.replace(/^data:[^;]+;base64,/, '').trim();
-        const byteChars = atob(base64Clean);
-        const byteArray = Uint8Array.from(byteChars, c => c.charCodeAt(0));
-        blob = new Blob([byteArray], { type: mime });
-      } else {
-        blob = new Blob(["Sample resume content"], { type: mime });
+      if (!f.data) {
+        throw new Error(`File '${f.name}' has no binary or text data provided. Please upload the file first.`);
       }
+
+      // Handle standard and URL-safe base64
+      let base64Clean = f.data.replace(/^data:[^;]+;base64,/, '').trim();
+      base64Clean = base64Clean.replace(/-/g, '+').replace(/_/g, '/');
+      while (base64Clean.length % 4) {
+        base64Clean += '=';
+      }
+
+      const byteChars = atob(base64Clean);
+      const byteArray = Uint8Array.from(byteChars, c => c.charCodeAt(0));
+      const blob = new Blob([byteArray], { type: mime });
 
       const file = new File([blob], f.name, { type: mime, lastModified: Date.now() });
       dt.items.add(file);
@@ -346,5 +372,41 @@
       filesAttached: filesPayload.map(f => f.name),
       message: `Attached ${filesPayload.length} file(s) to input '${refId}'.`
     };
+  };
+
+  /**
+   * Performs an HTML5 and pointer drag sequence from start element to end element.
+   * @param {Element} startEl
+   * @param {Element} endEl
+   * @param {number} sx - Start X
+   * @param {number} sy - Start Y
+   * @param {number} ex - End X
+   * @param {number} ey - End Y
+   */
+  window.__dispatchDrag = function(startEl, endEl, sx, sy, ex, ey) {
+    const dt = new DataTransfer();
+
+    // 1. Pointer & Mouse down
+    startEl.dispatchEvent(new PointerEvent('pointerdown', { clientX: sx, clientY: sy, bubbles: true }));
+    startEl.dispatchEvent(new MouseEvent('mousedown', { clientX: sx, clientY: sy, bubbles: true }));
+
+    // 2. HTML5 dragstart
+    startEl.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: dt, clientX: sx, clientY: sy }));
+
+    // 3. Move & dragenter/dragover on drop target
+    startEl.dispatchEvent(new PointerEvent('pointermove', { clientX: ex, clientY: ey, bubbles: true }));
+    startEl.dispatchEvent(new MouseEvent('mousemove', { clientX: ex, clientY: ey, bubbles: true }));
+
+    endEl.dispatchEvent(new DragEvent('dragenter', { bubbles: true, cancelable: true, dataTransfer: dt, clientX: ex, clientY: ey }));
+    endEl.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt, clientX: ex, clientY: ey }));
+
+    // 4. Drop & dragend
+    endEl.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt, clientX: ex, clientY: ey }));
+    startEl.dispatchEvent(new DragEvent('dragend', { bubbles: true, cancelable: true, dataTransfer: dt, clientX: ex, clientY: ey }));
+
+    endEl.dispatchEvent(new PointerEvent('pointerup', { clientX: ex, clientY: ey, bubbles: true }));
+    endEl.dispatchEvent(new MouseEvent('mouseup', { clientX: ex, clientY: ey, bubbles: true }));
+
+    return true;
   };
 })();

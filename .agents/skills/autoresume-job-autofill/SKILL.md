@@ -36,8 +36,9 @@ flowchart TD
 ## 2. Phase-by-Phase Execution Protocol
 
 ### Phase 0: Dynamic Initialization & Resume Processing
-1. **Check Existing Preferences**:
-   - Call `get_preferences` and `list_files` to check if the user has already uploaded preferences or resume files in the extension.
+1. **Check Existing Preferences & Files**:
+   - Call `get_preferences` and `list_files` to check if preferences or resume files were already uploaded in the extension.
+   - If a file is present (e.g. `Resume.pdf` or `Resume.md`), call `read_file({ name: fileName })` to extract its text content directly.
 2. **If Not Initialized**:
    - **Do not guess or assume defaults.**
    - Prompt the user to provide their resume (by pasting text in chat or uploading `.pdf` / `.md` via the extension's **Files & Resume** tab).

@@ -6,6 +6,7 @@ Navigate the user's active browser tab, perceive job application forms, and comp
 DYNAMIC INITIALIZATION (NO PRELOADED DATA):
 - DO NOT assume that applicant preferences or resume files exist on disk or preloaded in the environment.
 - At the start of a session, check if preferences are active using `get_preferences` and `list_files`.
+- If files are available in `list_files` (e.g. 'Resume.pdf' or 'Resume.md'), read their content directly using `read_file({ name: fileName })`.
 - If preferences are NOT yet initialized:
   1. Ask the user to provide their resume text or upload their resume file (.pdf, .md) via the extension's 'Files & Resume' tab.
   2. Parse the provided resume into the standard preferences schema.

@@ -6,7 +6,8 @@ import {
   handleUpdatePreferencesSection,
   handleGetPreferences,
   handleStoreFile,
-  handleListFiles
+  handleListFiles,
+  handleReadFile
 } from '../src/tools/schema-tools.js';
 import { resolveTemplateVariables } from '../src/utils/template-resolver.js';
 
@@ -104,5 +105,19 @@ const listRes = handleListFiles();
 assert.equal(listRes.totalFiles, 1);
 assert.equal(listRes.files[0].name, "Resume.pdf");
 console.log('✓ handleStoreFile & handleListFiles passed.');
+
+// 8. Test handleReadFile (Markdown & PDF)
+const storeMd = handleStoreFile({
+  name: "Resume.md",
+  data: Buffer.from("# Jane Doe\nSoftware Engineer").toString('base64'),
+  mimeType: "text/markdown",
+  description: "Markdown resume"
+});
+assert.equal(storeMd.success, true);
+
+const readMdRes = handleReadFile({ name: "Resume.md" });
+assert.equal(readMdRes.success, true);
+assert.equal(readMdRes.text, "# Jane Doe\nSoftware Engineer");
+console.log('✓ handleReadFile (Resume.md) passed.');
 
 console.log('\nAll AutoResume MCP tests passed successfully!');

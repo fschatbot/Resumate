@@ -20,6 +20,7 @@ import {
   handleGetPreferences,
   handleStoreFile,
   handleListFiles,
+  handleReadFile,
   setSyncCallback
 } from './tools/schema-tools.js';
 import {
@@ -200,6 +201,20 @@ async function handleJsonRpcRequest(request) {
           });
         }
 
+        // Validate required arguments declared in tool schema
+        const toolDef = TOOLS_BY_NAME.get(toolName);
+        if (toolDef?.inputSchema?.required) {
+          for (const reqField of toolDef.inputSchema.required) {
+            if (rawArgs[reqField] === undefined || rawArgs[reqField] === null) {
+              return sendResponse({
+                jsonrpc: "2.0",
+                id,
+                result: formatToolError(`Missing required argument '${reqField}' for tool '${toolName}'.`)
+              });
+            }
+          }
+        }
+
         // Automatic template substitution: resolve ${preferences.path} references
         // But do not corrupt raw arguments for set_preferences or update_preferences_section
         const resolvedArgs = (toolName === "set_preferences" || toolName === "update_preferences_section")
@@ -221,6 +236,8 @@ async function handleJsonRpcRequest(request) {
             executionResult = handleStoreFile(resolvedArgs);
           } else if (toolName === "list_files") {
             executionResult = handleListFiles();
+          } else if (toolName === "read_file") {
+            executionResult = handleReadFile(resolvedArgs);
           } else {
             // Browser automation tools routed to extension bridge
             executionResult = await bridge.executeTool(toolName, resolvedArgs);
@@ -363,12 +380,25 @@ const rl = readline.createInterface({
   terminal: false
 });
 
-rl.on('line', (line) => {
+rl.on('line', async (line) => {
   const trimmed = line.trim();
   if (!trimmed) return;
   try {
-    const request = JSON.parse(trimmed);
-    handleJsonRpcRequest(request);
+    const parsed = JSON.parse(trimmed);
+    if (Array.isArray(parsed)) {
+      if (parsed.length === 0) {
+        return sendResponse({
+          jsonrpc: "2.0",
+          id: null,
+          error: { code: -32600, message: "Invalid Request: empty batch" }
+        });
+      }
+      for (const item of parsed) {
+        await handleJsonRpcRequest(item);
+      }
+      return;
+    }
+    await handleJsonRpcRequest(parsed);
   } catch (err) {
     console.error("[MCP Server] Received malformed JSON line:", trimmed);
     sendResponse({

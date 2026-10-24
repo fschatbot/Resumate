@@ -555,6 +555,17 @@ export const TOOL_CATALOG = [
       type: "object",
       properties: {}
     }
+  },
+  {
+    name: "read_file",
+    description: "Reads the content of an uploaded or stored file (e.g. resume PDF or Markdown). For text, Markdown, or JSON files, returns the decoded UTF-8 string text. For binary/PDF files, returns base64 and text extracts.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Name of the file to inspect (e.g. 'Resume.pdf' or 'Resume.md')." }
+      },
+      required: ["name"]
+    }
   }
 ];
 

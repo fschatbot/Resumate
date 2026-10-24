@@ -28,11 +28,9 @@
     "storage",
     "activeTab",
     "scripting",
-    "debugger",
     "tabGroups",
     "tabs",
     "webNavigation",
-    "downloads",
     "unlimitedStorage"
   ],
   "host_permissions": [
@@ -62,8 +60,8 @@
   "commands": {
     "_execute_action": {
       "suggested_key": {
-        "default": "Ctrl+Shift+U",
-        "mac": "Command+Shift+U"
+        "default": "Alt+A",
+        "mac": "Alt+A"
       },
       "description": "Toggle AutoResume sidepanel"
     }

@@ -218,6 +218,15 @@ export class ExtensionBridge extends EventEmitter {
       throw new Error(NO_EXTENSION_MESSAGE);
     }
 
+    let effectiveTimeout = timeoutMs;
+    if (params && params.timeoutMs) {
+      effectiveTimeout = Math.max(1000, Number(params.timeoutMs));
+    } else if (toolName === 'browser_batch' && Array.isArray(params?.actions)) {
+      effectiveTimeout = Math.max(DEFAULT_TIMEOUT_MS, params.actions.length * 4000);
+    } else if (toolName === 'browser_wait' && params?.time) {
+      effectiveTimeout = Math.max(DEFAULT_TIMEOUT_MS, (Number(params.time) + 5) * 1000);
+    }
+
     const id = crypto.randomUUID();
     const packet = {
       id,
@@ -230,9 +239,9 @@ export class ExtensionBridge extends EventEmitter {
       const timer = setTimeout(() => {
         if (this.pendingRequests.has(id)) {
           this.pendingRequests.delete(id);
-          reject(new Error(`Tool execution for '${toolName}' timed out after ${timeoutMs}ms.`));
+          reject(new Error(`Tool execution for '${toolName}' timed out after ${effectiveTimeout}ms.`));
         }
-      }, timeoutMs);
+      }, effectiveTimeout);
 
       this.pendingRequests.set(id, { resolve, reject, timer });
       try {

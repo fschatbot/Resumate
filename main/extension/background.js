@@ -6,7 +6,9 @@
  * and dynamic bi-directional sync of preferences and user files.
  */
 
-const DEFAULT_WS_URL = "ws://127.0.0.1:9001";
+import { validatePreferences } from './validator.js';
+
+const DEFAULT_WS_PORT = 9001;
 const MCP_TAB_GROUP_TITLE = "AutoResume (MCP)";
 const MCP_TAB_GROUP_COLOR = "purple";
 
@@ -16,6 +18,8 @@ let activeMcpTabId = null;
 let socket = null;
 let isConnectedToBridge = false;
 let reconnectTimer = null;
+let keepAliveTimer = null;
+let currentWsPort = DEFAULT_WS_PORT;
 
 // Statistics & Tool Call History
 const sessionStats = {
@@ -278,22 +282,47 @@ function notifyBridgeTabConnected() {
 // WebSocket Bridge Client (ws://127.0.0.1:9001)
 // ============================================================================
 
-function connectWebSocketBridge() {
+function startKeepAlive() {
+  if (keepAliveTimer) clearInterval(keepAliveTimer);
+  keepAliveTimer = setInterval(() => {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "ping", timestamp: Date.now() }));
+    }
+  }, 20000);
+}
+
+function stopKeepAlive() {
+  if (keepAliveTimer) {
+    clearInterval(keepAliveTimer);
+    keepAliveTimer = null;
+  }
+}
+
+async function connectWebSocketBridge() {
   if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
     return;
   }
 
+  // Load configured port from storage if available
   try {
-    socket = new WebSocket(DEFAULT_WS_URL);
+    const data = await chrome.storage.local.get(["wsPort"]);
+    if (data.wsPort) currentWsPort = data.wsPort;
+  } catch (e) {}
+
+  const wsUrl = `ws://127.0.0.1:${currentWsPort}`;
+
+  try {
+    socket = new WebSocket(wsUrl);
 
     socket.onopen = async () => {
-      console.log("[AutoResume] Connected to MCP Desktop Bridge.");
+      console.log(`[AutoResume] Connected to MCP Desktop Bridge on ${wsUrl}`);
       isConnectedToBridge = true;
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
       }
 
+      startKeepAlive();
       await verifyTabConfinement(null);
       notifyBridgeTabConnected();
 
@@ -392,12 +421,14 @@ function connectWebSocketBridge() {
     };
 
     socket.onclose = () => {
+      stopKeepAlive();
       isConnectedToBridge = false;
       broadcastTelemetry();
       scheduleBridgeReconnect();
     };
 
     socket.onerror = () => {
+      stopKeepAlive();
       isConnectedToBridge = false;
     };
   } catch (err) {
@@ -439,6 +470,14 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
       } else if (params.url === "forward") {
         await chrome.tabs.goForward(targetTabId);
       } else {
+        if (params.force) {
+          // Bypass beforeunload prompts
+          await chrome.scripting.executeScript({
+            target: { tabId: targetTabId },
+            world: "MAIN",
+            func: () => { window.onbeforeunload = null; }
+          }).catch(() => {});
+        }
         await chrome.tabs.update(targetTabId, { url: params.url });
       }
       await waitForTabComplete(targetTabId);
@@ -461,15 +500,17 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
     case "read_page": {
       const filter = params.filter || "all";
       const depth = params.depth || 15;
+      const maxChars = params.maxChars || 50000;
+      const rootRefId = params.rootRefId || null;
       const res = await chrome.scripting.executeScript({
         target: { tabId: targetTabId },
-        func: (f, d) => {
+        func: (f, d, mc, rr) => {
           if (typeof window.__generateAccessibilityTree === "function") {
-            return window.__generateAccessibilityTree(f, d);
+            return window.__generateAccessibilityTree(f, d, mc, rr);
           }
           return { yaml: "Accessibility tree script initializing... Please re-run.", url: window.location.href };
         },
-        args: [filter, depth]
+        args: [filter, depth, maxChars, rootRefId]
       });
       return res[0]?.result || { yaml: "Empty tree." };
     }
@@ -479,7 +520,19 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
         target: { tabId: targetTabId },
         func: (query) => {
           if (typeof window.__getElementByRef === "function") {
-            const el = window.__getElementByRef(query);
+            let el = window.__getElementByRef(query);
+            if (!el && query && typeof query === "string") {
+              // Natural language fuzzy/token matching against interactive accessible text
+              const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+              const candidates = Array.from(document.querySelectorAll('button, a, input, select, textarea, [role], label'));
+              for (const cand of candidates) {
+                const text = (cand.getAttribute('aria-label') || cand.getAttribute('placeholder') || cand.getAttribute('value') || cand.innerText || cand.textContent || '').toLowerCase();
+                if (tokens.every(t => text.includes(t))) {
+                  el = cand;
+                  break;
+                }
+              }
+            }
             if (el) {
               const ref = window.__registerElementRef ? window.__registerElementRef(el) : null;
               return { found: true, ref, tagName: el.tagName, role: el.getAttribute('role') || el.tagName.toLowerCase() };
@@ -607,15 +660,18 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
           if (sx === undefined || ex === undefined) throw new Error("Could not determine drag start and end coordinates.");
 
           const target = startEl || document.elementFromPoint(sx, sy) || document.body;
-          target.dispatchEvent(new PointerEvent('pointerdown', { clientX: sx, clientY: sy, bubbles: true }));
-          target.dispatchEvent(new MouseEvent('mousedown', { clientX: sx, clientY: sy, bubbles: true }));
-
-          target.dispatchEvent(new PointerEvent('pointermove', { clientX: ex, clientY: ey, bubbles: true }));
-          target.dispatchEvent(new MouseEvent('mousemove', { clientX: ex, clientY: ey, bubbles: true }));
-
           const dropTarget = endEl || document.elementFromPoint(ex, ey) || target;
-          dropTarget.dispatchEvent(new PointerEvent('pointerup', { clientX: ex, clientY: ey, bubbles: true }));
-          dropTarget.dispatchEvent(new MouseEvent('mouseup', { clientX: ex, clientY: ey, bubbles: true }));
+
+          if (typeof window.__dispatchDrag === "function") {
+            window.__dispatchDrag(target, dropTarget, sx, sy, ex, ey);
+          } else {
+            target.dispatchEvent(new PointerEvent('pointerdown', { clientX: sx, clientY: sy, bubbles: true }));
+            target.dispatchEvent(new MouseEvent('mousedown', { clientX: sx, clientY: sy, bubbles: true }));
+            target.dispatchEvent(new PointerEvent('pointermove', { clientX: ex, clientY: ey, bubbles: true }));
+            target.dispatchEvent(new MouseEvent('mousemove', { clientX: ex, clientY: ey, bubbles: true }));
+            dropTarget.dispatchEvent(new PointerEvent('pointerup', { clientX: ex, clientY: ey, bubbles: true }));
+            dropTarget.dispatchEvent(new MouseEvent('mouseup', { clientX: ex, clientY: ey, bubbles: true }));
+          }
           return true;
         },
         args: [{
@@ -869,6 +925,12 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
     case "tabs_close": {
       const targetId = params.tabId || activeMcpTabId;
       if (!targetId) throw new Error("No tabId provided to close.");
+      if (mcpGroupId !== null) {
+        const tab = await chrome.tabs.get(targetId).catch(() => null);
+        if (tab && tab.groupId !== mcpGroupId) {
+          throw new Error(`Tab ${targetId} is not in the AutoResume MCP tab group. Refusing to close.`);
+        }
+      }
       await chrome.tabs.remove(targetId);
       return { success: true, message: `Closed tab ${targetId}` };
     }
@@ -876,6 +938,7 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
     case "javascript_exec": {
       const res = await chrome.scripting.executeScript({
         target: { tabId: targetTabId },
+        world: "MAIN",
         func: async (codeStr) => {
           try {
             let out = eval(codeStr);
@@ -1008,8 +1071,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "RECONNECT_BRIDGE") {
+    if (msg.port) currentWsPort = msg.port;
+    if (socket) {
+      try { socket.close(); } catch (e) {}
+      socket = null;
+    }
     connectWebSocketBridge();
-    sendResponse({ success: true });
+    sendResponse({ success: true, port: currentWsPort });
+    return true;
+  }
+
+  if (msg.type === "UPDATE_SETTINGS") {
+    chrome.storage.local.set({ behaviorSettings: msg.settings }, () => {
+      sendResponse({ success: true });
+    });
     return true;
   }
 
@@ -1045,6 +1120,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // Handle preferences update from side panel
   if (msg.type === "USER_SET_PREFERENCES") {
+    const valResult = validatePreferences(msg.payload);
+    if (!valResult.valid) {
+      sendResponse({ success: false, error: `Preferences validation failed: ${valResult.errors.join('; ')}` });
+      return true;
+    }
+
     chrome.storage.local.set({ preferences: msg.payload }, () => {
       if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({

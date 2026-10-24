@@ -253,3 +253,56 @@ export function handleListFiles() {
     files
   };
 }
+
+/**
+ * Reads the text/data content of an uploaded or stored file.
+ * @param {object} args
+ * @param {string} args.name - Filename
+ * @returns {object}
+ */
+export function handleReadFile(args = {}) {
+  if (!args.name) {
+    throw new Error("Missing required argument: 'name'");
+  }
+
+  const file = sessionFiles.get(args.name);
+  if (!file) {
+    const available = Array.from(sessionFiles.keys()).join(', ') || 'none';
+    throw new Error(`File '${args.name}' not found in session storage. Available files: ${available}`);
+  }
+
+  let textContent = null;
+  if (file.data) {
+    try {
+      let base64Clean = file.data.replace(/^data:[^;]+;base64,/, '').trim();
+      base64Clean = base64Clean.replace(/-/g, '+').replace(/_/g, '/');
+      while (base64Clean.length % 4) base64Clean += '=';
+      const buf = Buffer.from(base64Clean, 'base64');
+
+      if (file.name.endsWith('.md') || file.name.endsWith('.json') || file.name.endsWith('.txt') || file.mimeType?.includes('text') || file.mimeType?.includes('json')) {
+        textContent = buf.toString('utf8');
+      } else if (file.name.endsWith('.pdf') || file.mimeType?.includes('pdf')) {
+        // Extract readable ASCII/Latin text streams from PDF
+        const raw = buf.toString('latin1');
+        const matches = [...raw.matchAll(/\(([^)]{2,})\)\s*Tj/g)].map(m => m[1]);
+        if (matches.length > 0) {
+          textContent = matches.join(' ');
+        } else {
+          textContent = `[Binary PDF file: ${file.name}, size: ${buf.length} bytes. Base64 content is stored and ready for file_upload.]`;
+        }
+      }
+    } catch (e) {
+      textContent = `[Failed to decode text: ${e.message}]`;
+    }
+  }
+
+  return {
+    success: true,
+    name: file.name,
+    mimeType: file.mimeType,
+    description: file.description,
+    hasData: Boolean(file.data),
+    text: textContent,
+    data: file.data
+  };
+}

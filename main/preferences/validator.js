@@ -52,6 +52,10 @@ export function validatePreferences(data, section = null) {
       return;
     }
     eduList.forEach((edu, idx) => {
+      if (!edu || typeof edu !== "object") {
+        errors.push(`education[${idx}] must be an object.`);
+        return;
+      }
       if (!edu.institution) errors.push(`education[${idx}].institution is required.`);
       if (!edu.degree) errors.push(`education[${idx}].degree is required.`);
       if (!edu.major) errors.push(`education[${idx}].major is required.`);
@@ -68,6 +72,10 @@ export function validatePreferences(data, section = null) {
       return;
     }
     expList.forEach((exp, idx) => {
+      if (!exp || typeof exp !== "object") {
+        errors.push(`experience[${idx}] must be an object.`);
+        return;
+      }
       if (!exp.company) errors.push(`experience[${idx}].company is required.`);
       if (!exp.role) errors.push(`experience[${idx}].role is required.`);
       if (!exp.startDate) errors.push(`experience[${idx}].startDate is required.`);
@@ -83,12 +91,33 @@ export function validatePreferences(data, section = null) {
       return;
     }
     projList.forEach((proj, idx) => {
+      if (!proj || typeof proj !== "object") {
+        errors.push(`projects[${idx}] must be an object.`);
+        return;
+      }
       if (!proj.title) errors.push(`projects[${idx}].title is required.`);
-      if (proj.technologies !== undefined && !Array.isArray(proj.technologies)) {
-        errors.push(`projects[${idx}].technologies must be an array.`);
+      if (!Array.isArray(proj.technologies)) {
+        errors.push(`projects[${idx}].technologies is required and must be an array.`);
       }
       if (proj.pointers !== undefined && !Array.isArray(proj.pointers)) {
         errors.push(`projects[${idx}].pointers must be an array of strings.`);
+      }
+    });
+  };
+
+  const validateAwards = (awardsList) => {
+    if (!Array.isArray(awardsList)) {
+      errors.push("'awards' must be an array.");
+      return;
+    }
+    awardsList.forEach((award, idx) => {
+      if (!award || typeof award !== "object") {
+        errors.push(`awards[${idx}] must be an object.`);
+        return;
+      }
+      if (!award.title) errors.push(`awards[${idx}].title is required.`);
+      if (award.pointers !== undefined && !Array.isArray(award.pointers)) {
+        errors.push(`awards[${idx}].pointers must be an array of strings.`);
       }
     });
   };
@@ -121,9 +150,7 @@ export function validatePreferences(data, section = null) {
       case "experience": validateExperience(sectionData); break;
       case "projects": validateProjects(sectionData); break;
       case "skills": validateSkills(sectionData); break;
-      case "awards":
-        if (!Array.isArray(sectionData)) errors.push("awards must be an array.");
-        break;
+      case "awards": validateAwards(sectionData); break;
       case "demographicsAndLegal":
         if (typeof sectionData !== "object" || sectionData === null || Array.isArray(sectionData)) {
           errors.push("demographicsAndLegal must be an object.");
@@ -146,6 +173,7 @@ export function validatePreferences(data, section = null) {
     validateExperience(data.experience);
     validateProjects(data.projects);
     validateSkills(data.skills);
+    if (data.awards !== undefined) validateAwards(data.awards);
   }
 
   return {
@@ -204,7 +232,9 @@ export function resolvePreferenceTemplate(input, preferences) {
     const singleTokenMatch = input.trim().match(/^\$\{preferences\.([^}]+)\}$/);
     if (singleTokenMatch) {
       const resolved = getPreferenceByPath(preferences, singleTokenMatch[1]);
-      return resolved !== undefined ? resolved : "";
+      if (resolved === undefined || resolved === null) return "";
+      if (typeof resolved === "object") return resolved;
+      return String(resolved);
     }
 
     return input.replace(/\$\{preferences\.([^}]+)\}/g, (match, pathKey) => {
