@@ -12,6 +12,7 @@
 
   // Visual action indicator overlay
   let indicatorOverlay = null;
+  let indicatorTimeout = null;
 
   function ensureIndicatorOverlay() {
     if (!indicatorOverlay) {
@@ -20,8 +21,9 @@
       indicatorOverlay.style.position = 'fixed';
       indicatorOverlay.style.pointerEvents = 'none';
       indicatorOverlay.style.zIndex = '2147483647';
-      indicatorOverlay.style.transition = 'all 0.15s ease-out';
+      indicatorOverlay.style.transition = 'transform 0.12s ease-out, opacity 0.15s ease-out';
       indicatorOverlay.style.display = 'none';
+      indicatorOverlay.style.boxSizing = 'border-box';
       document.documentElement.appendChild(indicatorOverlay);
     }
     return indicatorOverlay;
@@ -31,39 +33,77 @@
    * Displays a temporary glowing indicator over an interaction point.
    * @param {number} x - Client X
    * @param {number} y - Client Y
-   * @param {string} [actionType="click"]
+   * @param {string} [actionType="click"] - "click" | "hover" | "type"
+   * @param {number} [duration=350] - Display duration in ms
    */
-  window.__showActionIndicator = function(x, y, actionType = 'click') {
+  window.__showActionIndicator = function(x, y, actionType = 'click', duration = 350) {
     const el = ensureIndicatorOverlay();
-    const size = 32;
+    if (indicatorTimeout) {
+      clearTimeout(indicatorTimeout);
+      indicatorTimeout = null;
+    }
+
+    const size = actionType === 'hover' ? 44 : 38;
     el.style.width = `${size}px`;
     el.style.height = `${size}px`;
     el.style.left = `${x - size / 2}px`;
     el.style.top = `${y - size / 2}px`;
     el.style.borderRadius = '50%';
-    el.style.border = actionType === 'type' ? '2.5px solid #10B981' : '2.5px solid #6366F1';
-    el.style.backgroundColor = actionType === 'type' ? 'rgba(16, 185, 129, 0.25)' : 'rgba(99, 102, 241, 0.25)';
-    el.style.boxShadow = actionType === 'type' ? '0 0 12px rgba(16, 185, 129, 0.6)' : '0 0 12px rgba(99, 102, 241, 0.6)';
-    el.style.display = 'block';
-    el.style.transform = 'scale(0.8)';
+    el.style.display = 'flex';
+    el.style.alignItems = 'center';
+    el.style.justifyContent = 'center';
+    el.style.opacity = '1';
+
+    if (actionType === 'hover') {
+      // Vivid Emerald / Cyan pulse for hover
+      el.style.border = '3px solid #10b981';
+      el.style.background = 'radial-gradient(circle, rgba(16, 185, 129, 0.45) 0%, rgba(6, 182, 212, 0.2) 65%, transparent 100%)';
+      el.style.boxShadow = '0 0 16px #10b981, 0 0 32px rgba(16, 185, 129, 0.5), inset 0 0 10px rgba(16, 185, 129, 0.4)';
+      el.innerHTML = '<div style="width: 10px; height: 10px; border-radius: 50%; background: #ffffff; box-shadow: 0 0 8px #10b981;"></div>';
+    } else if (actionType === 'type') {
+      // Emerald / Blue for typing
+      el.style.border = '2.5px solid #06b6d4';
+      el.style.background = 'rgba(6, 182, 212, 0.25)';
+      el.style.boxShadow = '0 0 14px rgba(6, 182, 212, 0.6)';
+      el.innerHTML = '<div style="width: 8px; height: 8px; border-radius: 50%; background: #ffffff; box-shadow: 0 0 6px #06b6d4;"></div>';
+    } else {
+      // High-contrast Cyan ripple for click
+      el.style.border = '3px solid #06b6d4';
+      el.style.background = 'radial-gradient(circle, rgba(6, 182, 212, 0.55) 0%, rgba(6, 182, 212, 0.2) 60%, transparent 100%)';
+      el.style.boxShadow = '0 0 18px #06b6d4, 0 0 36px rgba(6, 182, 212, 0.6), inset 0 0 10px #06b6d4';
+      el.innerHTML = '<div style="width: 8px; height: 8px; border-radius: 50%; background: #ffffff; box-shadow: 0 0 8px #ffffff;"></div>';
+    }
+
+    el.style.transform = 'scale(0.6)';
 
     requestAnimationFrame(() => {
       el.style.transform = 'scale(1.15)';
       setTimeout(() => {
         el.style.transform = 'scale(1.0)';
-        setTimeout(() => {
-          el.style.display = 'none';
-        }, 350);
-      }, 150);
+      }, 100);
     });
+
+    indicatorTimeout = setTimeout(() => {
+      el.style.opacity = '0';
+      setTimeout(() => {
+        el.style.display = 'none';
+        el.innerHTML = '';
+      }, 150);
+    }, Math.max(150, duration));
   };
 
   /**
    * Hides indicator overlay (called before screenshots).
    */
   window.__hideActionIndicator = function() {
+    if (indicatorTimeout) {
+      clearTimeout(indicatorTimeout);
+      indicatorTimeout = null;
+    }
     if (indicatorOverlay) {
       indicatorOverlay.style.display = 'none';
+      indicatorOverlay.style.opacity = '0';
+      indicatorOverlay.innerHTML = '';
     }
   };
 
@@ -111,25 +151,46 @@
 
   /**
    * Dispatches realistic synthetic mouse click events and native action.
-   * Ensures handlers do not fire twice.
+   * Smoothly scrolls target into view, highlights position, and triggers click.
    * @param {Element} target
    * @param {string} [button="left"]
    * @param {number} [clickCount=1]
+   * @returns {Promise<boolean>}
    */
-  window.__dispatchClick = function(target, button = 'left', clickCount = 1) {
+  window.__dispatchClick = async function(target, button = 'left', clickCount = 1, doScroll = true) {
     if (!target) return false;
 
-    if (typeof target.scrollIntoView === 'function') {
-      try {
-        target.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
-      } catch (e) {}
+    if (doScroll && typeof target.scrollIntoView === 'function') {
+      await new Promise((resolve) => {
+        let scrollTimer = null;
+        const onScroll = () => {
+          if (scrollTimer) clearTimeout(scrollTimer);
+          scrollTimer = setTimeout(done, 80);
+        };
+        const done = () => {
+          window.removeEventListener('scroll', onScroll, { capture: true });
+          window.removeEventListener('scrollend', done);
+          if (scrollTimer) clearTimeout(scrollTimer);
+          resolve();
+        };
+        window.addEventListener('scroll', onScroll, { capture: true, passive: true });
+        window.addEventListener('scrollend', done, { once: true });
+        try {
+          target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+        } catch (e) {
+          try { target.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e2) {}
+        }
+        scrollTimer = setTimeout(done, 180);
+      });
+      await new Promise(r => setTimeout(r, 50));
     }
 
     const rect = target.getBoundingClientRect();
     const cx = rect.left + rect.width / 2;
     const cy = rect.top + rect.height / 2;
 
-    window.__showActionIndicator(cx, cy, 'click');
+    window.__showActionIndicator(cx, cy, 'click', 350);
+    await new Promise(r => setTimeout(r, 50));
 
     const buttonCode = button === 'right' ? 2 : (button === 'middle' ? 1 : 0);
     const mouseOpts = {
@@ -154,6 +215,9 @@
     if (typeof target.focus === 'function') {
       target.focus();
     }
+
+    // 10 CPS click duration: 100ms hold between down and up
+    await new Promise(r => setTimeout(r, 100));
 
     target.dispatchEvent(new PointerEvent('pointerup', mouseOpts));
     target.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
@@ -181,28 +245,42 @@
   };
 
   /**
-   * Dispatches hover events.
+   * Dispatches hover events with smooth scrolling and maintained hover duration.
    * @param {Element} target
+   * @param {number} [hoverDuration=150] - Milliseconds to maintain hover (at least 100ms)
+   * @returns {Promise<boolean>}
    */
-  window.__dispatchHover = function(target) {
+  window.__dispatchHover = async function(target, hoverDuration = 150) {
     if (!target) return false;
+
+    const duration = Math.max(100, Number(hoverDuration) || 150);
 
     if (typeof target.scrollIntoView === 'function') {
       try {
-        target.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
-      } catch (e) {}
+        target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+      } catch (e) {
+        try { target.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e2) {}
+      }
+      // Wait for smooth scrolling to settle
+      await new Promise(r => setTimeout(r, 120));
     }
 
     const rect = target.getBoundingClientRect();
     const cx = rect.left + rect.width / 2;
     const cy = rect.top + rect.height / 2;
 
-    window.__showActionIndicator(cx, cy, 'hover');
+    window.__showActionIndicator(cx, cy, 'hover', duration + 50);
 
     const opts = { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy };
     target.dispatchEvent(new PointerEvent('pointerover', opts));
+    target.dispatchEvent(new PointerEvent('pointerenter', opts));
     target.dispatchEvent(new MouseEvent('mouseover', opts));
+    target.dispatchEvent(new MouseEvent('mouseenter', opts));
     target.dispatchEvent(new MouseEvent('mousemove', opts));
+
+    // Maintain hover state for at least 100ms
+    await new Promise(r => setTimeout(r, duration));
+
     return true;
   };
 
@@ -219,8 +297,11 @@
 
     if (typeof target.scrollIntoView === 'function') {
       try {
-        target.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
-      } catch (e) {}
+        target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+      } catch (e) {
+        try { target.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e2) {}
+      }
+      await new Promise(r => setTimeout(r, 100));
     }
 
     target.focus();

@@ -382,11 +382,6 @@ body {
   background-color: oklch(0.704 0.191 22.216 / 8%);
 }
 
-.tool-card.batch-container {
-  border-left-color: var(--primary);
-  border-left-width: 3px;
-}
-
 /* Compact Card Header */
 .tool-card-header {
   display: flex;
@@ -511,26 +506,219 @@ body {
   overflow-y: auto;
 }
 
-/* Batch Step List */
-.batch-steps-list {
+/* Batch Container (Special Dedicated Representation) */
+.batch-group-container {
   display: flex;
+  flex-direction: column;
+  background-color: var(--card);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--primary);
+  animation: cardEntrance 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.batch-group-container.running {
+  border-left-color: oklch(0.704 0.191 22.216);
+}
+
+.batch-group-container.success {
+  border-left-color: oklch(0.845 0.143 164.978);
+}
+
+.batch-group-container.error {
+  border-left-color: var(--destructive);
+  background-color: oklch(0.704 0.191 22.216 / 6%);
+}
+
+.batch-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  background-color: oklch(0.52 0.105 223.128 / 6%);
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 0.15s ease;
+}
+
+.batch-group-header:hover {
+  background-color: oklch(0.52 0.105 223.128 / 12%);
+}
+
+.batch-group-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.batch-icon-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--primary);
+  flex-shrink: 0;
+}
+
+.batch-title-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.batch-main-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  color: var(--primary);
+}
+
+.batch-step-count-pill {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 4px;
+  background: oklch(0.52 0.105 223.128 / 18%);
+  color: var(--primary);
+  border: 1px solid oklch(0.52 0.105 223.128 / 30%);
+}
+
+.batch-group-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.batch-chevron-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.batch-group-container.expanded .batch-chevron-toggle .chevron-indicator {
+  transform: rotate(180deg);
+}
+
+/* Batch Group Body */
+.batch-group-body {
+  display: none;
+  padding: 6px 8px 8px 8px;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.batch-group-container.expanded .batch-group-body {
+  display: flex;
+}
+
+.batch-timestamp {
+  font-size: 10px;
+  color: var(--muted-foreground);
+}
+
+.batch-inner-tools-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+/* Individual Inner Tool Call inside Batch */
+.batch-inner-card {
+  display: flex;
+  flex-direction: column;
+  background-color: var(--background);
+  border: 1px solid var(--border-subtle);
+  border-left: 2px solid var(--muted-foreground);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.batch-inner-card:hover {
+  border-color: oklch(0.52 0.105 223.128 / 50%);
+  background-color: oklch(0.218 0.008 223.9 / 50%);
+}
+
+.batch-inner-card.running {
+  border-left-color: oklch(0.704 0.191 22.216);
+}
+
+.batch-inner-card.success {
+  border-left-color: oklch(0.845 0.143 164.978);
+}
+
+.batch-inner-card.failed,
+.batch-inner-card.error {
+  border-left-color: var(--destructive);
+  background-color: oklch(0.704 0.191 22.216 / 8%);
+}
+
+.batch-inner-card.queued {
+  border-left-color: var(--border);
+  opacity: 0.65;
+}
+
+.batch-inner-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 7px;
+  gap: 6px;
+}
+
+.batch-inner-card-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.step-num {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--muted-foreground);
+}
+
+.batch-inner-card-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.batch-inner-card-body {
+  display: none;
+  padding: 0 6px 6px 6px;
+  border-top: 1px dashed var(--border-subtle);
+  margin-top: 2px;
   flex-direction: column;
   gap: 4px;
 }
 
-.batch-step-item {
+.batch-inner-card.expanded .batch-inner-card-body {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 3px 6px;
-  background-color: var(--muted);
-  font-size: 10px;
-  border: 1px solid var(--border-subtle);
 }
 
-.batch-step-item .step-tool {
+.batch-inner-card.expanded .chevron-indicator {
+  transform: rotate(180deg);
+}
+
+.step-result-snippet {
+  background-color: oklch(0.148 0.004 228.8);
+  border: 1px solid var(--border-subtle);
+  padding: 4px 6px;
   font-family: var(--font-mono);
-  font-weight: 600;
+  font-size: 9px;
+  color: oklch(0.845 0.143 164.978);
+  max-height: 120px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 .screenshot-preview-btn {
@@ -704,6 +892,41 @@ body {
 
 .file-delete-btn:hover {
   text-decoration: underline;
+}
+
+#setActiveTabBtn.targeted,
+#setActiveTabBtn:disabled {
+  opacity: 0.9;
+  cursor: default;
+  background-color: oklch(0.845 0.143 164.978 / 15%);
+  border-color: oklch(0.845 0.143 164.978 / 40%);
+  color: oklch(0.845 0.143 164.978);
+  pointer-events: none;
+}
+
+.preference-card {
+  border-left: 2px solid var(--primary);
+  background-color: oklch(0.52 0.105 223.128 / 6%);
+}
+
+.file-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pref-badge {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 700;
+  padding: 1px 4px;
+  background-color: oklch(0.52 0.105 223.128 / 18%);
+  color: var(--primary);
+  border: 1px solid oklch(0.52 0.105 223.128 / 30%);
+}
+
+.pref-icon {
+  color: var(--primary);
 }
 
 /* Provider Chips */

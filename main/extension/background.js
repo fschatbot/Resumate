@@ -132,6 +132,7 @@ export async function isolateTabIntoMcpGroup(tabId) {
     await saveSessionState();
     notifyBridgeTabConnected();
     broadcastTelemetry();
+    attachDebugger(tabId).catch(() => {});
     return mcpGroupId;
   } catch (err) {
     console.error("[AutoResume] Error grouping tab:", err);
@@ -201,6 +202,318 @@ async function verifyTabConfinement(tabId) {
   return activeMcpTabId;
 }
 
+export async function removeTabFromMcpGroup(tabId) {
+  try {
+    const targetId = tabId || activeMcpTabId;
+    if (!targetId) return false;
+
+    await detachDebugger(targetId);
+
+    try {
+      await chrome.tabs.ungroup(targetId);
+    } catch (e) {}
+
+    if (activeMcpTabId === targetId) {
+      activeMcpTabId = null;
+      sessionStats.activeTabId = null;
+      sessionStats.activeTabTitle = "";
+      sessionStats.activeTabUrl = "";
+      await saveSessionState();
+      broadcastTelemetry();
+    }
+    return true;
+  } catch (err) {
+    console.error("[AutoResume] Error removing tab from group:", err);
+    return false;
+  }
+}
+
+// ============================================================================
+// Chrome DevTools Protocol (CDP) & Trusted Input Simulation
+// ============================================================================
+
+const attachedDebuggers = new Set();
+
+export async function attachDebugger(tabId) {
+  if (!tabId) return false;
+  if (attachedDebuggers.has(tabId)) return true;
+
+  try {
+    await chrome.debugger.attach({ tabId }, "1.3");
+    attachedDebuggers.add(tabId);
+    return true;
+  } catch (e) {
+    if (e.message && e.message.includes("Already attached")) {
+      attachedDebuggers.add(tabId);
+      return true;
+    }
+    console.warn(`[AutoResume CDP] Could not attach debugger to tab #${tabId}:`, e.message);
+    return false;
+  }
+}
+
+export async function detachDebugger(tabId) {
+  if (!tabId || !attachedDebuggers.has(tabId)) return;
+  try {
+    await chrome.debugger.detach({ tabId });
+  } catch (e) {}
+  attachedDebuggers.delete(tabId);
+}
+
+if (chrome.debugger && chrome.debugger.onDetach) {
+  chrome.debugger.onDetach.addListener((source) => {
+    if (source && source.tabId) {
+      attachedDebuggers.delete(source.tabId);
+    }
+  });
+}
+
+async function sendCdpCommand(tabId, method, params = {}) {
+  const attached = await attachDebugger(tabId);
+  if (!attached) throw new Error(`DevTools Protocol debugger not attached to tab #${tabId}`);
+
+  return new Promise((resolve, reject) => {
+    chrome.debugger.sendCommand({ tabId }, method, params, (res) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+      } else {
+        resolve(res);
+      }
+    });
+  });
+}
+
+/**
+ * Smoothly scrolls element into view (waiting for scroll animation to genuinely finish),
+ * then measures viewport center coordinates to prevent coordinate desync.
+ * @param {number} tabId
+ * @param {string} elementRef
+ * @param {boolean} [shouldScroll=true]
+ */
+async function getElementCenterCoordinates(tabId, elementRef, shouldScroll = true) {
+  const res = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: async (refId, doScroll) => {
+      const el = window.__getElementByRef ? window.__getElementByRef(refId) : document.querySelector(refId);
+      if (!el) throw new Error(`Element '${refId}' not found on page.`);
+
+      if (doScroll && typeof el.scrollIntoView === 'function') {
+        const initialRect = el.getBoundingClientRect();
+        const inViewport = (
+          initialRect.top >= 0 &&
+          initialRect.left >= 0 &&
+          initialRect.bottom <= (window.innerHeight || document.documentElement.clientHeight) &&
+          initialRect.right <= (window.innerWidth || document.documentElement.clientWidth)
+        );
+
+        if (!inViewport) {
+          // Perform smooth scroll and wait for the scroll animation to complete
+          await new Promise((resolve) => {
+            let scrollEndTimer = null;
+
+            const onScrollEvent = () => {
+              if (scrollEndTimer) clearTimeout(scrollEndTimer);
+              scrollEndTimer = setTimeout(onScrollEnd, 80);
+            };
+
+            const onScrollEnd = () => {
+              window.removeEventListener('scroll', onScrollEvent, { capture: true });
+              window.removeEventListener('scrollend', onScrollEnd);
+              if (scrollEndTimer) clearTimeout(scrollEndTimer);
+              resolve();
+            };
+
+            window.addEventListener('scroll', onScrollEvent, { capture: true, passive: true });
+            window.addEventListener('scrollend', onScrollEnd, { once: true });
+
+            try {
+              el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+            } catch (e) {
+              try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e2) {}
+            }
+
+            // Fallback safety timeout if no scroll occurred or already at scroll position
+            scrollEndTimer = setTimeout(onScrollEnd, 180);
+          });
+
+          // Extra layout settlement frame to ensure coordinates are completely stable
+          await new Promise(r => setTimeout(r, 50));
+        }
+      }
+
+      // Now that any scrolling has completely ended and settled, locate the position
+      const rect = el.getBoundingClientRect();
+      const cx = Math.round(rect.left + rect.width / 2);
+      const cy = Math.round(rect.top + rect.height / 2);
+      return { x: cx, y: cy, tagName: el.tagName };
+    },
+    args: [elementRef, shouldScroll !== false]
+  });
+  return res[0]?.result;
+}
+
+/**
+ * Dispatches trusted hardware mouse click(s) via DevTools Protocol.
+ * Enforces 10 cps click duration (100ms hold from mouse down to mouse up).
+ */
+async function cdpClick(tabId, x, y, button = 'left', clickCount = 1) {
+  const attached = await attachDebugger(tabId);
+
+  // Show visual ripple indicator on page
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (cx, cy) => {
+      if (window.__showActionIndicator) window.__showActionIndicator(cx, cy, 'click', 350);
+    },
+    args: [x, y]
+  }).catch(() => {});
+
+  if (!attached) {
+    // Fallback if CDP is not available on restricted page
+    return chrome.scripting.executeScript({
+      target: { tabId },
+      func: async (cx, cy, btn, cnt) => {
+        const el = document.elementFromPoint(cx, cy);
+        if (!el) throw new Error(`No element found at [${cx}, ${cy}].`);
+        return window.__dispatchClick ? await window.__dispatchClick(el, btn, cnt) : (el.click(), true);
+      },
+      args: [x, y, button, clickCount]
+    });
+  }
+
+  // 1. Dispatch mouseMoved (move into position)
+  await sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x,
+    y
+  });
+
+  const cdpButton = button === 'right' ? 'right' : (button === 'middle' ? 'middle' : 'left');
+  const buttons = button === 'right' ? 2 : (button === 'middle' ? 4 : 1);
+
+  for (let count = 1; count <= clickCount; count++) {
+    // 2. Mouse Press (trusted event with isTrusted: true)
+    await sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x,
+      y,
+      button: cdpButton,
+      clickCount: count,
+      buttons
+    });
+
+    // 10 CPS click duration: exactly 100ms hold from mouse down to mouse up
+    await new Promise(r => setTimeout(r, 100));
+
+    // 3. Mouse Release (trusted event)
+    await sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x,
+      y,
+      button: cdpButton,
+      clickCount: count,
+      buttons: 0
+    });
+
+    if (count < clickCount) {
+      await new Promise(r => setTimeout(r, 60));
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Dispatches trusted hardware mouse hover via DevTools Protocol and maintains hover state.
+ */
+async function cdpHover(tabId, x, y, hoverMs = 150) {
+  const duration = Math.max(100, hoverMs);
+  const attached = await attachDebugger(tabId);
+
+  // Show visual glowing hover indicator
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (cx, cy, d) => {
+      if (window.__showActionIndicator) window.__showActionIndicator(cx, cy, 'hover', d + 50);
+    },
+    args: [x, y]
+  }).catch(() => {});
+
+  if (!attached) {
+    return chrome.scripting.executeScript({
+      target: { tabId },
+      func: async (cx, cy, d) => {
+        const el = document.elementFromPoint(cx, cy);
+        if (!el) throw new Error(`No element found at [${cx}, ${cy}].`);
+        return window.__dispatchHover ? await window.__dispatchHover(el, d) : true;
+      },
+      args: [x, y, duration]
+    });
+  }
+
+  // Dispatch mouseMoved to trigger trusted hover
+  await sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x,
+    y
+  });
+
+  // Maintain hover position for duration (at least 100ms)
+  await new Promise(r => setTimeout(r, duration));
+  return true;
+}
+
+/**
+ * Dispatches trusted hardware drag & drop via DevTools Protocol.
+ */
+async function cdpDrag(tabId, sx, sy, ex, ey) {
+  const attached = await attachDebugger(tabId);
+  if (!attached) {
+    throw new Error("DevTools Protocol required for trusted drag & drop.");
+  }
+
+  // 1. Move to start position
+  await sendCdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: sx, y: sy });
+  await new Promise(r => setTimeout(r, 60));
+
+  // 2. Mouse Press
+  await sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: sx,
+    y: sy,
+    button: "left",
+    clickCount: 1,
+    buttons: 1
+  });
+  await new Promise(r => setTimeout(r, 80));
+
+  // 3. Move along trajectory in micro-steps
+  const steps = 8;
+  for (let i = 1; i <= steps; i++) {
+    const curX = Math.round(sx + (ex - sx) * (i / steps));
+    const curY = Math.round(sy + (ey - sy) * (i / steps));
+    await sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: curX,
+      y: curY,
+      buttons: 1
+    });
+    await new Promise(r => setTimeout(r, 25));
+  }
+
+  // 4. Mouse Release
+  await sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: ex,
+    y: ey,
+    button: "left",
+    clickCount: 1,
+    buttons: 0
+  });
+
+  return true;
+}
+
 // Track active tab changes
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
   try {
@@ -230,6 +543,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 
 // Handle tab close
 chrome.tabs.onRemoved.addListener(async (tabId) => {
+  detachDebugger(tabId);
   if (tabId === activeMcpTabId) {
     activeMcpTabId = null;
     sessionStats.activeTabId = null;
@@ -580,108 +894,115 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
     }
 
     case "browser_click": {
+      const shouldScroll = params.scroll !== false;
+      let x, y, elTag = "";
       if (params.element) {
-        const res = await chrome.scripting.executeScript({
-          target: { tabId: targetTabId },
-          func: (elRef, btn, cnt) => {
-            const el = window.__getElementByRef ? window.__getElementByRef(elRef) : document.querySelector(elRef);
-            if (!el) throw new Error(`Element '${elRef}' not found.`);
-            return window.__dispatchClick ? window.__dispatchClick(el, btn, cnt) : (el.click(), true);
-          },
-          args: [params.element, params.button || "left", params.clickCount || 1]
-        });
-        return { success: true, message: `Clicked element '${params.element}'.` };
+        const coords = await getElementCenterCoordinates(targetTabId, params.element, shouldScroll);
+        x = coords.x;
+        y = coords.y;
+        elTag = coords.tagName ? ` (${coords.tagName.toLowerCase()})` : "";
+      } else if (params.coordinates) {
+        x = Math.round(params.coordinates.x);
+        y = Math.round(params.coordinates.y);
+      } else {
+        throw new Error("browser_click requires 'element' or 'coordinates'.");
       }
 
-      if (params.coordinates) {
-        const res = await chrome.scripting.executeScript({
-          target: { tabId: targetTabId },
-          func: (x, y, btn, cnt) => {
-            const el = document.elementFromPoint(x, y);
-            if (!el) throw new Error(`No element found at coordinates [${x}, ${y}].`);
-            return window.__dispatchClick ? window.__dispatchClick(el, btn, cnt) : (el.click(), true);
-          },
-          args: [params.coordinates.x, params.coordinates.y, params.button || "left", params.clickCount || 1]
-        });
-        return { success: true, message: `Clicked coordinates [${params.coordinates.x}, ${params.coordinates.y}].` };
+      const clickCount = params.clickCount || 1;
+      await cdpClick(targetTabId, x, y, params.button || "left", clickCount);
+      return { success: true, message: `Clicked at [${x}, ${y}]${elTag} (clickCount: ${clickCount}, 10 cps / 100ms hold, trusted CDP).` };
+    }
+
+    case "browser_double_click": {
+      const shouldScroll = params.scroll !== false;
+      let x, y, elTag = "";
+      if (params.element) {
+        const coords = await getElementCenterCoordinates(targetTabId, params.element, shouldScroll);
+        x = coords.x;
+        y = coords.y;
+        elTag = coords.tagName ? ` (${coords.tagName.toLowerCase()})` : "";
+      } else if (params.coordinates) {
+        x = Math.round(params.coordinates.x);
+        y = Math.round(params.coordinates.y);
+      } else {
+        throw new Error("browser_double_click requires 'element' or 'coordinates'.");
       }
-      throw new Error("browser_click requires 'element' or 'coordinates'.");
+
+      await cdpClick(targetTabId, x, y, params.button || "left", 2);
+      return { success: true, message: `Double-clicked at [${x}, ${y}]${elTag} (10 cps / 100ms hold, trusted CDP).` };
+    }
+
+    case "browser_triple_click": {
+      const shouldScroll = params.scroll !== false;
+      let x, y, elTag = "";
+      if (params.element) {
+        const coords = await getElementCenterCoordinates(targetTabId, params.element, shouldScroll);
+        x = coords.x;
+        y = coords.y;
+        elTag = coords.tagName ? ` (${coords.tagName.toLowerCase()})` : "";
+      } else if (params.coordinates) {
+        x = Math.round(params.coordinates.x);
+        y = Math.round(params.coordinates.y);
+      } else {
+        throw new Error("browser_triple_click requires 'element' or 'coordinates'.");
+      }
+
+      await cdpClick(targetTabId, x, y, params.button || "left", 3);
+      return { success: true, message: `Triple-clicked at [${x}, ${y}]${elTag} (10 cps / 100ms hold, trusted CDP).` };
     }
 
     case "browser_hover": {
+      const shouldScroll = params.scroll !== false;
+      let hoverMs = 200;
+      if (params.duration !== undefined) hoverMs = Number(params.duration);
+      else if (params.time !== undefined) hoverMs = Number(params.time) * (Number(params.time) < 10 ? 1000 : 1);
+      else if (params.seconds !== undefined) hoverMs = Number(params.seconds) * 1000;
+      else if (params.ms !== undefined) hoverMs = Number(params.ms);
+      hoverMs = Math.max(100, Math.min(hoverMs, 30000));
+
+      let x, y, elTag = "";
       if (params.element) {
-        await chrome.scripting.executeScript({
-          target: { tabId: targetTabId },
-          func: (elRef) => {
-            const el = window.__getElementByRef ? window.__getElementByRef(elRef) : document.querySelector(elRef);
-            if (!el) throw new Error(`Element '${elRef}' not found.`);
-            return window.__dispatchHover ? window.__dispatchHover(el) : true;
-          },
-          args: [params.element]
-        });
-        return { success: true, message: `Hovered over '${params.element}'.` };
+        const coords = await getElementCenterCoordinates(targetTabId, params.element, shouldScroll);
+        x = coords.x;
+        y = coords.y;
+        elTag = coords.tagName ? ` (${coords.tagName.toLowerCase()})` : "";
+      } else if (params.coordinates) {
+        x = Math.round(params.coordinates.x);
+        y = Math.round(params.coordinates.y);
+      } else {
+        throw new Error("browser_hover requires 'element' or 'coordinates'.");
       }
 
-      if (params.coordinates) {
-        await chrome.scripting.executeScript({
-          target: { tabId: targetTabId },
-          func: (x, y) => {
-            const el = document.elementFromPoint(x, y);
-            if (!el) throw new Error(`No element found at coordinates [${x}, ${y}].`);
-            return window.__dispatchHover ? window.__dispatchHover(el) : true;
-          },
-          args: [params.coordinates.x, params.coordinates.y]
-        });
-        return { success: true, message: `Hovered coordinates [${params.coordinates.x}, ${params.coordinates.y}].` };
-      }
-      throw new Error("browser_hover requires 'element' or 'coordinates'.");
+      await cdpHover(targetTabId, x, y, hoverMs);
+      return { success: true, message: `Hovered at [${x}, ${y}]${elTag} for ${hoverMs}ms (trusted CDP).` };
     }
 
     case "browser_drag": {
-      await chrome.scripting.executeScript({
-        target: { tabId: targetTabId },
-        func: (opts) => {
-          const startEl = opts.startElement ? (window.__getElementByRef ? window.__getElementByRef(opts.startElement) : document.querySelector(opts.startElement)) : null;
-          const endEl = opts.endElement ? (window.__getElementByRef ? window.__getElementByRef(opts.endElement) : document.querySelector(opts.endElement)) : null;
+      let sx, sy, ex, ey;
+      if (params.startElement) {
+        const coords = await getElementCenterCoordinates(targetTabId, params.startElement);
+        sx = coords.x;
+        sy = coords.y;
+      } else if (params.startCoordinates) {
+        sx = Math.round(params.startCoordinates.x);
+        sy = Math.round(params.startCoordinates.y);
+      }
 
-          let sx = opts.startCoordinates?.x, sy = opts.startCoordinates?.y;
-          if (startEl) {
-            const r = startEl.getBoundingClientRect();
-            sx = r.left + r.width / 2;
-            sy = r.top + r.height / 2;
-          }
-          let ex = opts.endCoordinates?.x, ey = opts.endCoordinates?.y;
-          if (endEl) {
-            const r = endEl.getBoundingClientRect();
-            ex = r.left + r.width / 2;
-            ey = r.top + r.height / 2;
-          }
+      if (params.endElement) {
+        const coords = await getElementCenterCoordinates(targetTabId, params.endElement);
+        ex = coords.x;
+        ey = coords.y;
+      } else if (params.endCoordinates) {
+        ex = Math.round(params.endCoordinates.x);
+        ey = Math.round(params.endCoordinates.y);
+      }
 
-          if (sx === undefined || ex === undefined) throw new Error("Could not determine drag start and end coordinates.");
+      if (sx === undefined || sy === undefined || ex === undefined || ey === undefined) {
+        throw new Error("browser_drag requires valid start and end elements or coordinates.");
+      }
 
-          const target = startEl || document.elementFromPoint(sx, sy) || document.body;
-          const dropTarget = endEl || document.elementFromPoint(ex, ey) || target;
-
-          if (typeof window.__dispatchDrag === "function") {
-            window.__dispatchDrag(target, dropTarget, sx, sy, ex, ey);
-          } else {
-            target.dispatchEvent(new PointerEvent('pointerdown', { clientX: sx, clientY: sy, bubbles: true }));
-            target.dispatchEvent(new MouseEvent('mousedown', { clientX: sx, clientY: sy, bubbles: true }));
-            target.dispatchEvent(new PointerEvent('pointermove', { clientX: ex, clientY: ey, bubbles: true }));
-            target.dispatchEvent(new MouseEvent('mousemove', { clientX: ex, clientY: ey, bubbles: true }));
-            dropTarget.dispatchEvent(new PointerEvent('pointerup', { clientX: ex, clientY: ey, bubbles: true }));
-            dropTarget.dispatchEvent(new MouseEvent('mouseup', { clientX: ex, clientY: ey, bubbles: true }));
-          }
-          return true;
-        },
-        args: [{
-          startElement: params.startElement,
-          endElement: params.endElement,
-          startCoordinates: params.startCoordinates,
-          endCoordinates: params.endCoordinates
-        }]
-      });
-      return { success: true, message: "Drag operation completed." };
+      await cdpDrag(targetTabId, sx, sy, ex, ey);
+      return { success: true, message: `Dragged from [${sx}, ${sy}] to [${ex}, ${ey}] (trusted CDP).` };
     }
 
     case "browser_type": {
@@ -802,9 +1123,16 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
     }
 
     case "browser_wait": {
-      const seconds = Math.min(Math.max(params.time || 0.1, 0.05), 300);
-      await new Promise(r => setTimeout(r, seconds * 1000));
-      return { success: true, message: `Waited for ${seconds}s.` };
+      let waitSeconds = 0.5;
+      if (params.time !== undefined) waitSeconds = Number(params.time);
+      else if (params.seconds !== undefined) waitSeconds = Number(params.seconds);
+      else if (params.duration !== undefined) waitSeconds = Number(params.duration) > 10 ? Number(params.duration) / 1000 : Number(params.duration);
+      else if (params.ms !== undefined) waitSeconds = Number(params.ms) / 1000;
+      else if (params.timeout !== undefined) waitSeconds = Number(params.timeout) / 1000;
+
+      waitSeconds = Math.min(Math.max(waitSeconds, 0.05), 300);
+      await new Promise(r => setTimeout(r, Math.round(waitSeconds * 1000)));
+      return { success: true, message: `Waited for ${waitSeconds}s.` };
     }
 
     case "browser_get_console_logs": {
@@ -826,12 +1154,27 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
       const stopOnError = params.stopOnError !== false;
       const stepReports = [];
 
+      const currentLogItem = toolExecutionHistory.find(h => h.tool === "browser_batch" && h.status === "running");
+      if (currentLogItem) {
+        currentLogItem.currentStep = 0;
+        currentLogItem.stepReports = [];
+        updateToolExecution(currentLogItem);
+        broadcastTelemetry();
+      }
+
       for (let i = 0; i < actions.length; i++) {
         const step = actions[i];
         const stepStart = Date.now();
         const stepParams = { ...step.params };
         if (params.tabId && !stepParams.tabId) {
           stepParams.tabId = params.tabId;
+        }
+
+        if (currentLogItem) {
+          currentLogItem.currentStep = i;
+          currentLogItem.stepReports = [...stepReports];
+          updateToolExecution(currentLogItem);
+          broadcastTelemetry();
         }
 
         try {
@@ -843,6 +1186,13 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
             duration: Date.now() - stepStart,
             result: stepRes
           });
+
+          if (currentLogItem) {
+            currentLogItem.stepReports = [...stepReports];
+            currentLogItem.currentStep = i + 1;
+            updateToolExecution(currentLogItem);
+            broadcastTelemetry();
+          }
         } catch (err) {
           stepReports.push({
             index: i,
@@ -851,6 +1201,13 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
             duration: Date.now() - stepStart,
             error: err.message
           });
+
+          if (currentLogItem) {
+            currentLogItem.stepReports = [...stepReports];
+            updateToolExecution(currentLogItem);
+            broadcastTelemetry();
+          }
+
           if (stopOnError) {
             return {
               batchCompleted: false,
@@ -867,6 +1224,19 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
         totalSteps: actions.length,
         steps: stepReports
       };
+    }
+
+    case "tabs_target": {
+      const tabId = params.tabId || targetTabId;
+      await isolateTabIntoMcpGroup(tabId);
+      await attachDebugger(tabId);
+      return { success: true, tabId, message: `Targeted tab #${tabId} with DevTools Protocol attached.` };
+    }
+
+    case "tabs_untarget": {
+      const tabId = params.tabId || targetTabId;
+      await removeTabFromMcpGroup(tabId);
+      return { success: true, tabId, message: `Untargeted tab #${tabId} and detached DevTools Protocol.` };
     }
 
     case "tabs_context": {
@@ -1043,6 +1413,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         } else {
           sendResponse({ success: false, error: "No target tab found in window." });
         }
+      } catch (err) {
+        sendResponse({ success: false, error: err.message });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.type === "UNTARGET_TAB") {
+    (async () => {
+      try {
+        await removeTabFromMcpGroup(msg.tabId);
+        sendResponse({ success: true });
       } catch (err) {
         sendResponse({ success: false, error: err.message });
       }

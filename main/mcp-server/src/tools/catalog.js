@@ -134,7 +134,7 @@ export const TOOL_CATALOG = [
   // --- Interaction & Input Simulation ---
   {
     name: "browser_click",
-    description: "Performs hardware or synthetic mouse click on an element by reference (@e1, ref_1), semantic label/role, CSS selector, or [x, y] coordinates.",
+    description: "Performs trusted hardware mouse click on an element by reference (@e1, ref_1), semantic label/role, CSS selector, or [x, y] coordinates via DevTools Protocol. Automatically scrolls to element (waiting for scroll to end) before locating coordinates and clicking with 10 cps (100ms hold) duration. Scrolling default is preferred unless it was followed by a hover.",
     inputSchema: {
       type: "object",
       properties: {
@@ -149,6 +149,10 @@ export const TOOL_CATALOG = [
             y: { type: "number" }
           },
           description: "Optional [x, y] coordinates in screenshot or viewport frame."
+        },
+        scroll: {
+          type: "boolean",
+          description: "Whether to scroll element into view before clicking (default: true). Scrolling default is preferred unless it was followed by a hover."
         },
         button: {
           type: "string",
@@ -170,8 +174,48 @@ export const TOOL_CATALOG = [
     }
   },
   {
+    name: "browser_double_click",
+    description: "Performs trusted double click on an element or coordinate using DevTools Protocol (e.g. to open items or select words). Automatically scrolls and waits for scroll settlement before locating coordinates. Click duration is 10 cps (100ms hold). Scrolling default is preferred unless it was followed by a hover.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        element: { type: "string", description: "Element reference or CSS selector." },
+        coordinates: {
+          type: "object",
+          properties: { x: { type: "number" }, y: { type: "number" } }
+        },
+        scroll: {
+          type: "boolean",
+          description: "Whether to scroll element into view before clicking (default: true). Scrolling default is preferred unless it was followed by a hover."
+        },
+        button: { type: "string", enum: ["left", "right", "middle"], description: "Default: 'left'." },
+        tabId: { type: "integer", description: "Target tab ID." }
+      }
+    }
+  },
+  {
+    name: "browser_triple_click",
+    description: "Performs trusted triple click on an element or coordinate using DevTools Protocol (e.g. to select an entire line or paragraph). Automatically scrolls and waits for scroll settlement before locating coordinates. Click duration is 10 cps (100ms hold). Scrolling default is preferred unless it was followed by a hover.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        element: { type: "string", description: "Element reference or CSS selector." },
+        coordinates: {
+          type: "object",
+          properties: { x: { type: "number" }, y: { type: "number" } }
+        },
+        scroll: {
+          type: "boolean",
+          description: "Whether to scroll element into view before clicking (default: true). Scrolling default is preferred unless it was followed by a hover."
+        },
+        button: { type: "string", enum: ["left", "right", "middle"], description: "Default: 'left'." },
+        tabId: { type: "integer", description: "Target tab ID." }
+      }
+    }
+  },
+  {
     name: "browser_hover",
-    description: "Hovers the mouse cursor over an element or coordinate to trigger hover states, tooltips, or dropdown activations.",
+    description: "Hovers the mouse cursor over an element or coordinate to trigger hover states, tooltips, or dropdown activations. Automatically scrolls smoothly into view and waits for scroll to end before locating coordinates. Scrolling default is preferred unless it was followed by a hover.",
     inputSchema: {
       type: "object",
       properties: {
@@ -182,6 +226,21 @@ export const TOOL_CATALOG = [
             x: { type: "number" },
             y: { type: "number" }
           }
+        },
+        scroll: {
+          type: "boolean",
+          description: "Whether to scroll element into view before hovering (default: true). Scrolling default is preferred unless it was followed by a hover."
+        },
+        coordinates: {
+          type: "object",
+          properties: {
+            x: { type: "number" },
+            y: { type: "number" }
+          }
+        },
+        duration: {
+          type: "integer",
+          description: "Duration to maintain hover state in milliseconds (minimum 100ms, default 150ms)."
         },
         tabId: { type: "integer", description: "Target tab ID." }
       }
@@ -414,6 +473,26 @@ export const TOOL_CATALOG = [
         tabId: { type: "integer", description: "Tab ID to close." }
       },
       required: ["tabId"]
+    }
+  },
+  {
+    name: "tabs_target",
+    description: "Targets and locks a browser tab into the AutoResume MCP group, attaching DevTools Protocol for trusted hardware simulation.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "integer", description: "Tab ID to target. If omitted, targets currently active tab." }
+      }
+    }
+  },
+  {
+    name: "tabs_untarget",
+    description: "Removes a tab from the AutoResume MCP group and detaches DevTools Protocol.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "integer", description: "Tab ID to untarget. If omitted, untargets active MCP tab." }
+      }
     }
   },
 

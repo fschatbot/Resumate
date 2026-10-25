@@ -61,6 +61,11 @@ const LUCIDE_ICONS = {
   tabs_context: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>',
   tabs_context_mcp: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/><path d="M8 2v4"/><path d="M16 2v4"/></svg>',
   tabs_create: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="12" y1="12" x2="12" y2="16"/><line x1="10" y1="14" x2="14" y2="14"/></svg>',
+  browser_double_click: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 9 5 12 1.8-5.2L21 14Z"/><path d="M7.2 2.2 8 5.1"/><path d="m5.1 8-2.9-.8"/></svg>',
+  browser_triple_click: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 9 5 12 1.8-5.2L21 14Z"/><path d="M7.2 2.2 8 5.1"/><path d="M14 4.1 12 6"/></svg>',
+  browser_drag: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><polyline points="15 19 12 22 9 19"/><polyline points="19 9 22 12 19 15"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/></svg>',
+  tabs_target: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="22" y1="12" x2="18" y2="12"/><line x1="6" y1="12" x2="2" y2="12"/><line x1="12" y1="6" x2="12" y2="2"/><line x1="12" y1="22" x2="12" y2="18"/></svg>',
+  tabs_untarget: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>',
   tabs_close: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="10" y1="12" x2="14" y2="16"/><line x1="14" y1="12" x2="10" y2="16"/></svg>',
   javascript_exec: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>',
   default: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/></svg>'
@@ -89,6 +94,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupQuickActions();
   setupActiveTabButtons();
   setupProviderSettings();
+
+  // Listen for local storage changes so files & preferences always sync dynamically
+  if (chrome.storage && chrome.storage.onChanged) {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === 'local' && (changes.files || changes.preferences)) {
+        loadStoredFiles();
+      }
+    });
+  }
 
   // Query background for initial telemetry state and active tab
   chrome.runtime.sendMessage({ type: "GET_STATE" }, (state) => {
@@ -128,6 +142,43 @@ function setupNavigationTabs() {
   }
 }
 
+let activeTargetTabId = null;
+
+async function updateTargetButtonState() {
+  if (!setActiveTabBtn) return;
+  try {
+    const [currentTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (!currentTab) return;
+
+    const isTargeted = activeTargetTabId !== null && currentTab.id === activeTargetTabId;
+    if (isTargeted) {
+      setActiveTabBtn.disabled = true;
+      setActiveTabBtn.classList.add('targeted');
+      setActiveTabBtn.innerHTML = `
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="20 6 9 17 4 12"/>
+        </svg>
+        <span>Targeted</span>
+      `;
+      setActiveTabBtn.title = "Current browser tab is targeted by AutoResume MCP";
+    } else {
+      setActiveTabBtn.disabled = false;
+      setActiveTabBtn.classList.remove('targeted');
+      setActiveTabBtn.innerHTML = `
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/>
+          <line x1="22" y1="12" x2="18" y2="12"/>
+          <line x1="6" y1="12" x2="2" y2="12"/>
+          <line x1="12" y1="6" x2="12" y2="2"/>
+          <line x1="12" y1="22" x2="12" y2="18"/>
+        </svg>
+        <span>Target</span>
+      `;
+      setActiveTabBtn.title = "Target visible browser tab with AutoResume MCP";
+    }
+  } catch (e) {}
+}
+
 function setupActiveTabButtons() {
   async function handleSetActiveTab() {
     try {
@@ -142,8 +193,9 @@ function setupActiveTabButtons() {
         tabId: tab.id
       }, (res) => {
         if (res && res.success) {
+          activeTargetTabId = res.tabId;
           if (statTabId) statTabId.textContent = `#${res.tabId}`;
-          alert(`✓ Tab #${res.tabId} ("${res.title || tab.title}") is locked as target.`);
+          updateTargetButtonState();
         } else {
           alert(`Failed to set active tab: ${res?.error || 'Unknown error'}`);
         }
@@ -154,7 +206,15 @@ function setupActiveTabButtons() {
   }
 
   if (setActiveTabBtn) setActiveTabBtn.addEventListener('click', handleSetActiveTab);
-  if (statTabContainer) setActiveTabBtn && statTabContainer.addEventListener('click', handleSetActiveTab);
+  if (statTabContainer) statTabContainer.addEventListener('click', handleSetActiveTab);
+
+  if (chrome.tabs && chrome.tabs.onActivated) {
+    chrome.tabs.onActivated.addListener(() => updateTargetButtonState());
+  }
+  if (chrome.tabs && chrome.tabs.onUpdated) {
+    chrome.tabs.onUpdated.addListener(() => updateTargetButtonState());
+  }
+  updateTargetButtonState();
 }
 
 // ============================================================================
@@ -171,6 +231,11 @@ function applyTelemetryState(state) {
     if (statTabId) {
       statTabId.textContent = stats.activeTabId ? `#${stats.activeTabId}` : '--';
       if (stats.activeTabTitle) statTabId.title = `${stats.activeTabTitle}\n${stats.activeTabUrl}`;
+    }
+
+    if (stats.activeTabId !== undefined) {
+      activeTargetTabId = stats.activeTabId;
+      updateTargetButtonState();
     }
   }
 
@@ -215,88 +280,195 @@ function renderToolFeed(items) {
   }
 
   items.forEach(item => {
-    const card = document.createElement('div');
-    const isBatch = item.tool === 'browser_batch' && item.params?.actions;
-    const statusClass = (item.status || 'running').toLowerCase();
-    const statusLabel = (item.status || 'RUNNING').toUpperCase();
-
-    card.className = `tool-card ${statusClass}${isBatch ? ' batch-container' : ''}`;
-
-    const timestamp = new Date(item.timestamp);
-    const timeStr = timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    const fullDate = timestamp.toLocaleString();
-
-    let durationText = '';
-    if (item.duration !== undefined) {
-      durationText = item.duration < 1000 ? `${item.duration}ms` : `${(item.duration / 1000).toFixed(1)}s`;
+    if (item.tool === 'browser_batch') {
+      renderBatchContainer(item);
+    } else {
+      renderRegularToolCard(item);
     }
+  });
+}
 
-    const batchStepCount = isBatch ? item.params.actions.length : 0;
-    const toolIcon = LUCIDE_ICONS[item.tool] || LUCIDE_ICONS.default;
+function renderBatchContainer(item) {
+  const container = document.createElement('div');
+  const statusClass = (item.status || 'running').toLowerCase();
+  const statusLabel = (item.status || 'RUNNING').toUpperCase();
 
-    let stepsHtml = '';
-    if (isBatch) {
-      const actions = item.params.actions || [];
-      const stepResults = item.result?.steps || [];
-      stepsHtml = `
-        <div class="batch-steps-list">
-          ${actions.map((act, idx) => {
-            const stepRes = stepResults[idx];
-            const stepStatus = stepRes ? stepRes.status : (item.status === 'running' ? 'RUNNING' : 'QUEUED');
-            return `
-              <div class="batch-step-item">
-                <span class="step-tool">${idx + 1}. ${escapeHtml(act.tool)}</span>
-                <span class="status-badge ${escapeHtml(stepStatus.toLowerCase())}">${escapeHtml(stepStatus)}</span>
-              </div>
-            `;
-          }).join('')}
+  // Container is marked expanded by default so inner individual tools are immediately visible
+  container.className = `batch-group-container ${statusClass} expanded`;
+
+  const timestamp = new Date(item.timestamp);
+  const fullDate = timestamp.toLocaleString();
+
+  let durationText = '';
+  if (item.duration !== undefined) {
+    durationText = item.duration < 1000 ? `${item.duration}ms` : `${(item.duration / 1000).toFixed(1)}s`;
+  }
+
+  const actions = item.params?.actions || [];
+  const stepResults = item.stepReports || item.result?.steps || [];
+  const currentStepIdx = item.currentStep !== undefined ? item.currentStep : stepResults.length;
+  const batchStepCount = actions.length;
+
+  container.innerHTML = `
+    <div class="batch-group-header">
+      <div class="batch-group-left">
+        <span class="batch-icon-badge">${LUCIDE_ICONS.browser_batch || LUCIDE_ICONS.default}</span>
+        <div class="batch-title-wrapper">
+          <span class="batch-main-label">BATCH</span>
+          <span class="batch-step-count-pill">${batchStepCount} ${batchStepCount === 1 ? 'CALL' : 'CALLS'}</span>
         </div>
-      `;
+      </div>
+      <div class="batch-group-right">
+        ${durationText ? `<span class="duration-badge">${durationText}</span>` : ''}
+        <span class="status-badge ${escapeHtml(statusClass)}">${statusLabel}</span>
+        <span class="batch-chevron-toggle">${CHEVRON_ICON}</span>
+      </div>
+    </div>
+    <div class="batch-group-body">
+      <div class="batch-timestamp">${escapeHtml(fullDate)}</div>
+      ${item.error ? `<div class="error-banner"><strong>Batch Error:</strong> ${escapeHtml(item.error)}</div>` : ''}
+      <div class="batch-inner-tools-list"></div>
+    </div>
+  `;
+
+  // Toggle container collapse on header click
+  const header = container.querySelector('.batch-group-header');
+  header.addEventListener('click', () => {
+    container.classList.toggle('expanded');
+  });
+
+  const innerToolsList = container.querySelector('.batch-inner-tools-list');
+
+  actions.forEach((act, idx) => {
+    const stepRes = stepResults[idx];
+    let stepStatus = 'QUEUED';
+    if (stepRes) {
+      stepStatus = (stepRes.status || 'SUCCESS').toUpperCase();
+    } else if (item.status === 'running') {
+      if (idx === currentStepIdx) {
+        stepStatus = 'RUNNING';
+      } else if (idx < currentStepIdx) {
+        stepStatus = 'SUCCESS';
+      } else {
+        stepStatus = 'QUEUED';
+      }
+    } else if (item.status === 'error') {
+      stepStatus = idx < stepResults.length ? (stepResults[idx]?.status || 'SUCCESS') : 'FAILED';
+    } else if (item.status === 'success') {
+      stepStatus = 'SUCCESS';
     }
 
-    let screenshotHtml = '';
-    if (item.result?.screenshotBase64) {
-      screenshotHtml = `
-        <a class="screenshot-preview-btn" href="#">
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-          View Captured Screenshot
-        </a>
-      `;
+    const stepStatusClass = stepStatus.toLowerCase();
+    let stepDurationText = '';
+    if (stepRes && stepRes.duration !== undefined) {
+      stepDurationText = stepRes.duration < 1000 ? `${stepRes.duration}ms` : `${(stepRes.duration / 1000).toFixed(1)}s`;
     }
 
-    card.innerHTML = `
-      <div class="tool-card-header">
-        <div class="tool-card-left">
-          <span class="tool-icon-wrapper">${toolIcon}</span>
-          <span class="tool-name">${escapeHtml(item.tool)}${isBatch ? `<span class="tool-batch-tag">[${batchStepCount}]</span>` : ''}</span>
+    const stepIcon = LUCIDE_ICONS[act.tool] || LUCIDE_ICONS.default;
+
+    const innerCard = document.createElement('div');
+    innerCard.className = `batch-inner-card ${stepStatusClass}`;
+
+    let stepErrorHtml = '';
+    if (stepRes && stepRes.error) {
+      stepErrorHtml = `<div class="error-banner"><strong>Error:</strong> ${escapeHtml(stepRes.error)}</div>`;
+    }
+
+    let stepResultHtml = '';
+    if (stepRes && stepRes.result && typeof stepRes.result === 'object' && Object.keys(stepRes.result).length > 0) {
+      stepResultHtml = `<div class="step-result-snippet"><strong>Result:</strong> ${escapeHtml(JSON.stringify(stepRes.result, null, 2))}</div>`;
+    }
+
+    innerCard.innerHTML = `
+      <div class="batch-inner-card-header">
+        <div class="batch-inner-card-left">
+          <span class="step-num">#${idx + 1}</span>
+          <span class="tool-icon-wrapper">${stepIcon}</span>
+          <span class="tool-name">${escapeHtml(act.tool)}</span>
         </div>
-        <div class="tool-card-right">
-          ${durationText ? `<span class="duration-badge">${durationText}</span>` : ''}
-          <span class="status-badge ${escapeHtml(statusClass)}">${statusLabel}</span>
+        <div class="batch-inner-card-right">
+          ${stepDurationText ? `<span class="duration-badge">${stepDurationText}</span>` : ''}
+          <span class="status-badge ${escapeHtml(stepStatusClass)}">${escapeHtml(stepStatus)}</span>
           ${CHEVRON_ICON}
         </div>
       </div>
-      <div class="tool-card-body">
-        <div class="tool-timestamp">${escapeHtml(fullDate)}</div>
-        <div class="code-box">${escapeHtml(JSON.stringify(item.params || {}, null, 2))}</div>
-        ${stepsHtml}
-        ${item.error ? `<div class="error-banner"><strong>Error:</strong> ${escapeHtml(item.error)}</div>` : ''}
-        ${screenshotHtml}
+      <div class="batch-inner-card-body">
+        <div class="code-box">${escapeHtml(JSON.stringify(act.params || {}, null, 2))}</div>
+        ${stepErrorHtml}
+        ${stepResultHtml}
       </div>
     `;
 
-    // Click anywhere on card to toggle expansion
-    card.addEventListener('click', (e) => {
-      if (e.target.closest('.screenshot-preview-btn')) {
-        e.preventDefault();
-        openImagePreview(`data:image/png;base64,${item.result.screenshotBase64}`);
-        return;
-      }
-      card.classList.toggle('expanded');
+    // Inner card click toggles its own body
+    innerCard.addEventListener('click', (e) => {
+      e.stopPropagation();
+      innerCard.classList.toggle('expanded');
     });
 
-    toolListContainer.appendChild(card);
+    innerToolsList.appendChild(innerCard);
   });
+
+  toolListContainer.appendChild(container);
+}
+
+function renderRegularToolCard(item) {
+  const card = document.createElement('div');
+  const statusClass = (item.status || 'running').toLowerCase();
+  const statusLabel = (item.status || 'RUNNING').toUpperCase();
+
+  card.className = `tool-card ${statusClass}`;
+
+  const timestamp = new Date(item.timestamp);
+  const fullDate = timestamp.toLocaleString();
+
+  let durationText = '';
+  if (item.duration !== undefined) {
+    durationText = item.duration < 1000 ? `${item.duration}ms` : `${(item.duration / 1000).toFixed(1)}s`;
+  }
+
+  const toolIcon = LUCIDE_ICONS[item.tool] || LUCIDE_ICONS.default;
+
+  let screenshotHtml = '';
+  if (item.result?.screenshotBase64) {
+    screenshotHtml = `
+      <a class="screenshot-preview-btn" href="#">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+        View Captured Screenshot
+      </a>
+    `;
+  }
+
+  card.innerHTML = `
+    <div class="tool-card-header">
+      <div class="tool-card-left">
+        <span class="tool-icon-wrapper">${toolIcon}</span>
+        <span class="tool-name">${escapeHtml(item.tool)}</span>
+      </div>
+      <div class="tool-card-right">
+        ${durationText ? `<span class="duration-badge">${durationText}</span>` : ''}
+        <span class="status-badge ${escapeHtml(statusClass)}">${statusLabel}</span>
+        ${CHEVRON_ICON}
+      </div>
+    </div>
+    <div class="tool-card-body">
+      <div class="tool-timestamp">${escapeHtml(fullDate)}</div>
+      <div class="code-box">${escapeHtml(JSON.stringify(item.params || {}, null, 2))}</div>
+      ${item.error ? `<div class="error-banner"><strong>Error:</strong> ${escapeHtml(item.error)}</div>` : ''}
+      ${screenshotHtml}
+    </div>
+  `;
+
+  // Click anywhere on card to toggle expansion
+  card.addEventListener('click', (e) => {
+    if (e.target.closest('.screenshot-preview-btn')) {
+      e.preventDefault();
+      openImagePreview(`data:image/png;base64,${item.result.screenshotBase64}`);
+      return;
+    }
+    card.classList.toggle('expanded');
+  });
+
+  toolListContainer.appendChild(card);
 }
 
 function showTooltip(e) {
@@ -333,11 +505,14 @@ async function loadStoredFiles() {
   storedFiles = data.files || [];
   activePreferences = data.preferences || null;
 
-  if (statFilesCount) statFilesCount.textContent = storedFiles.length;
+  const totalCount = storedFiles.length + (activePreferences ? 1 : 0);
+  if (statFilesCount) statFilesCount.textContent = totalCount;
 
   if (activePreferences && chatGreeting) {
     const name = activePreferences.general?.fullName || activePreferences.general?.firstName || "Applicant";
     chatGreeting.innerHTML = `Profile active for <strong>${escapeHtml(name)}</strong>. Forms will autofill with these credentials.`;
+  } else if (chatGreeting) {
+    chatGreeting.innerHTML = `<span>No preferences loaded yet. Upload your Resume (.pdf, .md) or Preferences (.json) to begin.</span>`;
   }
 
   renderFilesGrid();
@@ -432,31 +607,97 @@ function renderFilesGrid() {
   if (!filesGridContainer) return;
   filesGridContainer.innerHTML = '';
 
-  if (storedFiles.length === 0) {
+  const hasPreferences = Boolean(activePreferences);
+  const hasFiles = storedFiles && storedFiles.length > 0;
+
+  if (!hasPreferences && !hasFiles) {
     const emptyNotice = document.createElement('div');
-    emptyNotice.style.padding = '8px';
-    emptyNotice.style.fontSize = '10px';
+    emptyNotice.style.padding = '12px 8px';
+    emptyNotice.style.fontSize = '11px';
     emptyNotice.style.color = 'var(--muted-foreground)';
     emptyNotice.style.textAlign = 'center';
-    emptyNotice.textContent = 'No files stored. Upload Resume (.pdf, .md) or Preferences (.json).';
+    emptyNotice.style.border = '1px dashed var(--border)';
+    emptyNotice.textContent = 'No documents stored. Upload Resume (.pdf, .md) or Preferences (.json).';
     filesGridContainer.appendChild(emptyNotice);
     return;
   }
 
+  // 1. Render Active Preferences Profile Card if preferences exist in storage
+  if (hasPreferences) {
+    const prefCard = document.createElement('div');
+    prefCard.className = 'file-card preference-card';
+
+    const general = activePreferences.general || {};
+    const name = general.fullName || `${general.firstName || ''} ${general.lastName || ''}`.trim() || 'Applicant Preferences';
+    const email = general.email || general.emailAddress || '';
+
+    const sections = [];
+    if (activePreferences.education?.length) sections.push(`${activePreferences.education.length} schools`);
+    if (activePreferences.experience?.length) sections.push(`${activePreferences.experience.length} jobs`);
+    if (activePreferences.skills) sections.push('skills');
+    const sectionsText = sections.length > 0 ? sections.join(' • ') : 'Candidate credentials';
+
+    prefCard.innerHTML = `
+      <div class="file-card-left">
+        <svg class="file-icon pref-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+          <circle cx="9" cy="7" r="4"/>
+          <polyline points="16 11 18 13 22 9"/>
+        </svg>
+        <div class="file-info">
+          <div class="file-name-row">
+            <span class="file-name">${escapeHtml(name)}</span>
+            <span class="pref-badge">JSON Profile</span>
+          </div>
+          <span class="file-meta">${escapeHtml(email ? `${email} • ` : '')}${escapeHtml(sectionsText)}</span>
+        </div>
+      </div>
+      <div class="file-actions">
+        <button class="file-delete-btn" id="deletePreferencesBtn" title="Remove stored preferences profile">Clear</button>
+      </div>
+    `;
+
+    filesGridContainer.appendChild(prefCard);
+
+    const deletePrefBtn = prefCard.querySelector('#deletePreferencesBtn');
+    if (deletePrefBtn) {
+      deletePrefBtn.addEventListener('click', async () => {
+        if (confirm("Remove applicant preferences profile from storage?")) {
+          activePreferences = null;
+          await chrome.storage.local.set({ preferences: null });
+          loadStoredFiles();
+        }
+      });
+    }
+  }
+
+  // 2. Render each stored document file
   storedFiles.forEach((file, index) => {
     const card = document.createElement('div');
     card.className = 'file-card';
 
-    const fileIcon = file.name.endsWith('.pdf')
+    let displaySize = file.size;
+    if (!displaySize && file.data) {
+      displaySize = formatFileSize(Math.round(file.data.length * 0.75));
+    } else if (!displaySize) {
+      displaySize = 'Saved';
+    }
+
+    const isPdf = file.name.toLowerCase().endsWith('.pdf');
+    const isDoc = file.name.toLowerCase().endsWith('.md') || file.name.toLowerCase().endsWith('.txt');
+    const fileIcon = isPdf
       ? '<svg class="file-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>'
-      : '<svg class="file-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><polyline points="10 9 9 9 8 9"/></svg>';
+      : (isDoc
+          ? '<svg class="file-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>'
+          : '<svg class="file-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><polyline points="10 9 9 9 8 9"/></svg>'
+        );
 
     card.innerHTML = `
       <div class="file-card-left">
         ${fileIcon}
         <div class="file-info">
           <span class="file-name">${escapeHtml(file.name)}</span>
-          <span class="file-meta">${escapeHtml(file.size)}</span>
+          <span class="file-meta">${escapeHtml(displaySize)}</span>
         </div>
       </div>
       <div class="file-actions">
@@ -467,12 +708,12 @@ function renderFilesGrid() {
     filesGridContainer.appendChild(card);
   });
 
-  filesGridContainer.querySelectorAll('.file-delete-btn').forEach(btn => {
+  filesGridContainer.querySelectorAll('.file-delete-btn[data-index]').forEach(btn => {
     btn.addEventListener('click', async (e) => {
       const idx = parseInt(e.target.dataset.index, 10);
       storedFiles.splice(idx, 1);
       await chrome.storage.local.set({ files: storedFiles });
-      renderFilesGrid();
+      loadStoredFiles();
     });
   });
 }

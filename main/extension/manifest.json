@@ -31,7 +31,8 @@
     "tabGroups",
     "tabs",
     "webNavigation",
-    "unlimitedStorage"
+    "unlimitedStorage",
+    "debugger"
   ],
   "host_permissions": [
     "<all_urls>"
