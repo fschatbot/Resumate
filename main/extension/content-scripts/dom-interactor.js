@@ -161,28 +161,11 @@
     if (!target) return false;
 
     if (doScroll && typeof target.scrollIntoView === 'function') {
-      await new Promise((resolve) => {
-        let scrollTimer = null;
-        const onScroll = () => {
-          if (scrollTimer) clearTimeout(scrollTimer);
-          scrollTimer = setTimeout(done, 80);
-        };
-        const done = () => {
-          window.removeEventListener('scroll', onScroll, { capture: true });
-          window.removeEventListener('scrollend', done);
-          if (scrollTimer) clearTimeout(scrollTimer);
-          resolve();
-        };
-        window.addEventListener('scroll', onScroll, { capture: true, passive: true });
-        window.addEventListener('scrollend', done, { once: true });
-        try {
-          target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
-        } catch (e) {
-          try { target.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e2) {}
-        }
-        scrollTimer = setTimeout(done, 180);
-      });
-      await new Promise(r => setTimeout(r, 50));
+      try {
+        target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+      } catch (e) {
+        try { target.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e2) {}
+      }
     }
 
     const rect = target.getBoundingClientRect();
@@ -257,12 +240,10 @@
 
     if (typeof target.scrollIntoView === 'function') {
       try {
-        target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+        target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
       } catch (e) {
         try { target.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e2) {}
       }
-      // Wait for smooth scrolling to settle
-      await new Promise(r => setTimeout(r, 120));
     }
 
     const rect = target.getBoundingClientRect();
@@ -297,11 +278,10 @@
 
     if (typeof target.scrollIntoView === 'function') {
       try {
-        target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+        target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
       } catch (e) {
         try { target.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e2) {}
       }
-      await new Promise(r => setTimeout(r, 100));
     }
 
     target.focus();
@@ -368,11 +348,33 @@
     if (tag === 'INPUT' && (type === 'checkbox' || type === 'radio')) {
       const shouldCheck = (val === false || val === 'false' || val === 0 || val === '0') ? false : Boolean(val);
       if (el.checked !== shouldCheck) {
-        el.checked = shouldCheck;
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-        el.dispatchEvent(new Event('input', { bubbles: true }));
+        // Modern styled forms (Greenhouse, Lever, Workday) attach state listeners to <label>
+        const label = (el.labels && el.labels[0]) || (el.id ? document.querySelector(`label[for="${CSS.escape(el.id)}"]`) : null) || el.closest('label');
+        if (label) {
+          label.click();
+        } else {
+          try {
+            const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked');
+            if (desc && desc.set) {
+              desc.set.call(el, shouldCheck);
+            } else {
+              el.checked = shouldCheck;
+            }
+          } catch (e) {
+            el.checked = shouldCheck;
+          }
+          el.dispatchEvent(new Event('click', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        }
       }
       return { success: true, message: `Set ${type} '${refId}' to ${shouldCheck}` };
+    }
+
+    // Label element directly passed
+    if (tag === 'LABEL') {
+      el.click();
+      return { success: true, message: `Clicked label '${refId}'` };
     }
 
     // Standard Select

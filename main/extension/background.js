@@ -56,7 +56,20 @@ async function restoreSessionState() {
     } catch (e) {}
   }
 
-  // Ensure an active tab is acquired and grouped
+  // Verify group is still valid in Chrome
+  if (mcpGroupId !== null) {
+    try {
+      const group = await chrome.tabGroups.get(mcpGroupId);
+      if (!group) {
+        mcpGroupId = null;
+        activeMcpTabId = null;
+      }
+    } catch (e) {
+      mcpGroupId = null;
+      activeMcpTabId = null;
+    }
+  }
+
   await verifyTabConfinement(null);
 }
 
@@ -96,6 +109,31 @@ chrome.action.onClicked.addListener(async (tab) => {
 // Tab Group Confinement & Lifecycle Handlers
 // ============================================================================
 
+/**
+ * Ensures required content scripts are injected into target tab even if it was opened before extension load.
+ */
+async function ensureContentScriptsInjected(tabId) {
+  if (!tabId) return;
+  try {
+    const check = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => typeof window.__buildAccessibilityTree === 'function'
+    });
+    if (!check[0]?.result) {
+      await chrome.scripting.executeScript({
+        target: { tabId, allFrames: true },
+        files: [
+          "content-scripts/element-map.js",
+          "content-scripts/accessibility-tree.js",
+          "content-scripts/dom-interactor.js"
+        ]
+      });
+    }
+  } catch (e) {
+    // Restricted tab (e.g. chrome://) or already navigating
+  }
+}
+
 export async function isolateTabIntoMcpGroup(tabId) {
   try {
     const tab = await chrome.tabs.get(tabId);
@@ -114,6 +152,8 @@ export async function isolateTabIntoMcpGroup(tabId) {
           await saveSessionState();
           notifyBridgeTabConnected();
           broadcastTelemetry();
+          attachDebugger(tabId).catch(() => {});
+          await ensureContentScriptsInjected(tabId);
           return mcpGroupId;
         }
       } catch (e) {
@@ -133,6 +173,7 @@ export async function isolateTabIntoMcpGroup(tabId) {
     notifyBridgeTabConnected();
     broadcastTelemetry();
     attachDebugger(tabId).catch(() => {});
+    await ensureContentScriptsInjected(tabId);
     return mcpGroupId;
   } catch (err) {
     console.error("[AutoResume] Error grouping tab:", err);
@@ -141,65 +182,68 @@ export async function isolateTabIntoMcpGroup(tabId) {
 }
 
 /**
- * Robustly verifies tab availability. If tabId or activeMcpTabId is null or dead,
- * queries the user's active browser window and auto-groups the active tab.
+ * Robustly verifies tab confinement to the AutoResume (MCP) tab group.
+ * Does not silently kidnap tabs or auto-group unconfined tabs without user action.
  * @param {number|null} tabId
  * @returns {Promise<number|null>}
  */
 async function verifyTabConfinement(tabId) {
-  let candidateId = tabId || activeMcpTabId;
-
-  // 1. If we have a candidateId, verify that the tab is alive
-  if (candidateId) {
+  // If an explicit tabId was requested
+  if (tabId) {
     try {
-      const tab = await chrome.tabs.get(candidateId);
-      if (tab) {
-        if (mcpGroupId !== null && tab.groupId !== mcpGroupId) {
-          try {
-            await chrome.tabs.group({ tabIds: [candidateId], groupId: mcpGroupId });
-          } catch (e) {
-            await isolateTabIntoMcpGroup(candidateId);
-          }
-        }
-        activeMcpTabId = candidateId;
-        sessionStats.activeTabId = candidateId;
+      const tab = await chrome.tabs.get(tabId);
+      if (!tab) throw new Error(`Tab #${tabId} not found.`);
+      if (mcpGroupId !== null && tab.groupId === mcpGroupId) {
+        activeMcpTabId = tabId;
+        sessionStats.activeTabId = tabId;
         sessionStats.activeTabTitle = tab.title || "";
         sessionStats.activeTabUrl = tab.url || "";
-        return candidateId;
+        return tabId;
+      }
+      throw new Error(`Tab #${tabId} is not in the AutoResume (MCP) tab group. Please target this tab first or use tabs_target.`);
+    } catch (e) {
+      throw e;
+    }
+  }
+
+  // If no tabId was requested, verify current activeMcpTabId
+  if (activeMcpTabId) {
+    try {
+      const tab = await chrome.tabs.get(activeMcpTabId);
+      if (tab && (mcpGroupId === null || tab.groupId === mcpGroupId)) {
+        sessionStats.activeTabId = activeMcpTabId;
+        sessionStats.activeTabTitle = tab.title || "";
+        sessionStats.activeTabUrl = tab.url || "";
+        return activeMcpTabId;
       }
     } catch (e) {
-      candidateId = null;
       activeMcpTabId = null;
     }
   }
 
-  // 2. Fallback: actively query the currently active tab in the last focused window
-  try {
-    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    const fallbackTab = tabs.find(t => t.url && !t.url.startsWith("chrome-extension://") && !t.url.startsWith("chrome://"));
-    if (fallbackTab && fallbackTab.id) {
-      await isolateTabIntoMcpGroup(fallbackTab.id);
-      return fallbackTab.id;
+  // Look for any surviving tab within mcpGroupId
+  if (mcpGroupId !== null) {
+    try {
+      const groupTabs = await chrome.tabs.query({ groupId: mcpGroupId });
+      if (groupTabs.length > 0) {
+        activeMcpTabId = groupTabs[0].id;
+        sessionStats.activeTabId = groupTabs[0].id;
+        sessionStats.activeTabTitle = groupTabs[0].title || "";
+        sessionStats.activeTabUrl = groupTabs[0].url || "";
+        return activeMcpTabId;
+      } else {
+        mcpGroupId = null;
+      }
+    } catch (e) {
+      mcpGroupId = null;
     }
-    if (tabs[0]?.id) {
-      await isolateTabIntoMcpGroup(tabs[0].id);
-      return tabs[0].id;
-    }
-  } catch (err) {
-    console.error("[AutoResume] Fallback query failed:", err);
   }
 
-  // 3. Fallback: query any normal window tab
-  try {
-    const allTabs = await chrome.tabs.query({ currentWindow: true });
-    const normalTab = allTabs.find(t => t.url && !t.url.startsWith("chrome-extension://") && !t.url.startsWith("chrome://"));
-    if (normalTab && normalTab.id) {
-      await isolateTabIntoMcpGroup(normalTab.id);
-      return normalTab.id;
-    }
-  } catch (e) {}
-
-  return activeMcpTabId;
+  activeMcpTabId = null;
+  sessionStats.activeTabId = null;
+  sessionStats.activeTabTitle = "";
+  sessionStats.activeTabUrl = "";
+  return null;
 }
 
 export async function removeTabFromMcpGroup(tabId) {
@@ -260,6 +304,15 @@ export async function detachDebugger(tabId) {
   attachedDebuggers.delete(tabId);
 }
 
+export async function detachAllDebuggers() {
+  for (const tabId of Array.from(attachedDebuggers)) {
+    try {
+      await chrome.debugger.detach({ tabId });
+    } catch (e) {}
+  }
+  attachedDebuggers.clear();
+}
+
 if (chrome.debugger && chrome.debugger.onDetach) {
   chrome.debugger.onDetach.addListener((source) => {
     if (source && source.tabId) {
@@ -284,8 +337,8 @@ async function sendCdpCommand(tabId, method, params = {}) {
 }
 
 /**
- * Smoothly scrolls element into view (waiting for scroll animation to genuinely finish),
- * then measures viewport center coordinates to prevent coordinate desync.
+ * Instantly snaps element into view (zero scroll animation delay),
+ * then measures viewport center coordinates immediately without desync risk.
  * @param {number} tabId
  * @param {string} elementRef
  * @param {boolean} [shouldScroll=true]
@@ -298,50 +351,17 @@ async function getElementCenterCoordinates(tabId, elementRef, shouldScroll = tru
       if (!el) throw new Error(`Element '${refId}' not found on page.`);
 
       if (doScroll && typeof el.scrollIntoView === 'function') {
-        const initialRect = el.getBoundingClientRect();
-        const inViewport = (
-          initialRect.top >= 0 &&
-          initialRect.left >= 0 &&
-          initialRect.bottom <= (window.innerHeight || document.documentElement.clientHeight) &&
-          initialRect.right <= (window.innerWidth || document.documentElement.clientWidth)
-        );
-
-        if (!inViewport) {
-          // Perform smooth scroll and wait for the scroll animation to complete
-          await new Promise((resolve) => {
-            let scrollEndTimer = null;
-
-            const onScrollEvent = () => {
-              if (scrollEndTimer) clearTimeout(scrollEndTimer);
-              scrollEndTimer = setTimeout(onScrollEnd, 80);
-            };
-
-            const onScrollEnd = () => {
-              window.removeEventListener('scroll', onScrollEvent, { capture: true });
-              window.removeEventListener('scrollend', onScrollEnd);
-              if (scrollEndTimer) clearTimeout(scrollEndTimer);
-              resolve();
-            };
-
-            window.addEventListener('scroll', onScrollEvent, { capture: true, passive: true });
-            window.addEventListener('scrollend', onScrollEnd, { once: true });
-
+        try {
+            el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+          } catch (e) {
             try {
-              el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
-            } catch (e) {
-              try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e2) {}
-            }
-
-            // Fallback safety timeout if no scroll occurred or already at scroll position
-            scrollEndTimer = setTimeout(onScrollEnd, 180);
-          });
-
-          // Extra layout settlement frame to ensure coordinates are completely stable
-          await new Promise(r => setTimeout(r, 50));
-        }
+              el.scrollIntoView({ block: 'center', inline: 'center' });
+            } catch (e2) {}
+          }
+		await new Promise((r) => setTimeout(r, 50));
       }
 
-      // Now that any scrolling has completely ended and settled, locate the position
+      // Read final settled bounding rect immediately
       const rect = el.getBoundingClientRect();
       const cx = Math.round(rect.left + rect.width / 2);
       const cy = Math.round(rect.top + rect.height / 2);
@@ -578,9 +598,21 @@ if (chrome.tabGroups && chrome.tabGroups.onRemoved) {
   });
 }
 
+function safeSend(payload) {
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    try {
+      socket.send(typeof payload === "string" ? payload : JSON.stringify(payload));
+      return true;
+    } catch (e) {
+      console.warn("[AutoResume] Failed to send over bridge socket:", e);
+    }
+  }
+  return false;
+}
+
 function notifyBridgeTabConnected() {
-  if (socket && socket.readyState === WebSocket.OPEN && activeMcpTabId) {
-    socket.send(JSON.stringify({
+  if (activeMcpTabId) {
+    safeSend({
       type: "tab_connected",
       payload: {
         tabId: activeMcpTabId,
@@ -588,7 +620,7 @@ function notifyBridgeTabConnected() {
         title: sessionStats.activeTabTitle,
         url: sessionStats.activeTabUrl
       }
-    }));
+    });
   }
 }
 
@@ -599,9 +631,7 @@ function notifyBridgeTabConnected() {
 function startKeepAlive() {
   if (keepAliveTimer) clearInterval(keepAliveTimer);
   keepAliveTimer = setInterval(() => {
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: "ping", timestamp: Date.now() }));
-    }
+    safeSend({ type: "ping", timestamp: Date.now() });
   }, 20000);
 }
 
@@ -613,8 +643,12 @@ function stopKeepAlive() {
 }
 
 async function connectWebSocketBridge() {
-  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
-    return;
+  if (socket) {
+    if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+      return;
+    }
+    try { socket.close(); } catch (e) {}
+    socket = null;
   }
 
   // Load configured port from storage if available
@@ -628,7 +662,17 @@ async function connectWebSocketBridge() {
   try {
     socket = new WebSocket(wsUrl);
 
+    // Timeout safety: if stuck in CONNECTING for > 4s, close and retry
+    const connectTimeout = setTimeout(() => {
+      if (socket && socket.readyState === WebSocket.CONNECTING) {
+        try { socket.close(); } catch (e) {}
+        socket = null;
+        scheduleBridgeReconnect();
+      }
+    }, 4000);
+
     socket.onopen = async () => {
+      clearTimeout(connectTimeout);
       console.log(`[AutoResume] Connected to MCP Desktop Bridge on ${wsUrl}`);
       isConnectedToBridge = true;
       if (reconnectTimer) {
@@ -638,22 +682,22 @@ async function connectWebSocketBridge() {
 
       startKeepAlive();
       await verifyTabConfinement(null);
-      notifyBridgeTabConnected();
+      if (activeMcpTabId) notifyBridgeTabConnected();
 
       // Synchronize local preferences/files if any
       const localData = await chrome.storage.local.get(["preferences", "files"]);
       if (localData.preferences) {
-        socket.send(JSON.stringify({
+        safeSend({
           type: "preferences_updated",
           payload: localData.preferences
-        }));
+        });
       }
       if (Array.isArray(localData.files)) {
         for (const file of localData.files) {
-          socket.send(JSON.stringify({
+          safeSend({
             type: "file_uploaded",
             payload: file
-          }));
+          });
         }
       }
 
@@ -713,20 +757,20 @@ async function connectWebSocketBridge() {
             logItem.result = result;
             updateToolExecution(logItem);
 
-            socket.send(JSON.stringify({
+            safeSend({
               id: msg.id,
               result
-            }));
+            });
           } catch (err) {
             logItem.status = "error";
             logItem.duration = Date.now() - startTime;
             logItem.error = err.message;
             updateToolExecution(logItem);
 
-            socket.send(JSON.stringify({
+            safeSend({
               id: msg.id,
               error: { message: err.message, code: -32000 }
-            }));
+            });
           }
         }
       } catch (e) {
@@ -735,17 +779,26 @@ async function connectWebSocketBridge() {
     };
 
     socket.onclose = () => {
+      clearTimeout(connectTimeout);
       stopKeepAlive();
       isConnectedToBridge = false;
+      socket = null;
+      detachAllDebuggers().catch(() => {});
       broadcastTelemetry();
       scheduleBridgeReconnect();
     };
 
     socket.onerror = () => {
+      clearTimeout(connectTimeout);
       stopKeepAlive();
       isConnectedToBridge = false;
+      socket = null;
+      detachAllDebuggers().catch(() => {});
+      broadcastTelemetry();
+      scheduleBridgeReconnect();
     };
   } catch (err) {
+    socket = null;
     scheduleBridgeReconnect();
   }
 }
@@ -755,7 +808,7 @@ function scheduleBridgeReconnect() {
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connectWebSocketBridge();
-  }, 1000);
+  }, 2000);
 }
 
 // ============================================================================
@@ -763,14 +816,17 @@ function scheduleBridgeReconnect() {
 // ============================================================================
 
 export async function executeBrowserTool(toolName, params = {}, isBatchSubStep = false) {
-  const isTabManagementTool = ["tabs_create", "tabs_context", "tabs_context_mcp"].includes(toolName);
+  const isTabManagementTool = ["tabs_create", "tabs_context", "tabs_context_mcp", "tabs_target"].includes(toolName);
   let targetTabId = null;
 
   if (!isTabManagementTool) {
     targetTabId = await verifyTabConfinement(params.tabId || activeMcpTabId);
     if (!targetTabId) {
-      throw new Error("No active tab in AutoResume tab group. Please ensure a tab is open in Chrome.");
+      throw new Error("No active browser tab connected to AutoResume. Please click the AutoResume extension icon in Chrome and ensure the target tab is in the 'AutoResume (MCP)' tab group.");
     }
+    // Activate target tab to prevent background timer throttling
+    await chrome.tabs.update(targetTabId, { active: true }).catch(() => {});
+    await ensureContentScriptsInjected(targetTabId);
   }
 
   if (!isBatchSubStep) {
@@ -784,6 +840,13 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
       } else if (params.url === "forward") {
         await chrome.tabs.goForward(targetTabId);
       } else {
+        if (!params.url || typeof params.url !== "string") {
+          throw new Error("Invalid or missing URL parameter.");
+        }
+        const trimmedUrl = params.url.trim().toLowerCase();
+        if (!trimmedUrl.startsWith("http://") && !trimmedUrl.startsWith("https://")) {
+          throw new Error(`Navigation blocked: Only http:// and https:// protocols are permitted. Provided: '${params.url}'`);
+        }
         if (params.force) {
           // Bypass beforeunload prompts
           await chrome.scripting.executeScript({
@@ -1084,7 +1147,7 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
           }
           throw new Error("Form helper not initialized.");
         },
-        args: [params.ref, params.value]
+        args: [params.ref || params.element, params.value]
       });
       return res[0]?.result || { success: true };
     }
@@ -1227,14 +1290,20 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
     }
 
     case "tabs_target": {
-      const tabId = params.tabId || targetTabId;
+      let tabId = params.tabId;
+      if (!tabId) {
+        const activeTabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        tabId = activeTabs[0]?.id;
+      }
+      if (!tabId) throw new Error("No active browser tab found to target.");
       await isolateTabIntoMcpGroup(tabId);
       await attachDebugger(tabId);
       return { success: true, tabId, message: `Targeted tab #${tabId} with DevTools Protocol attached.` };
     }
 
     case "tabs_untarget": {
-      const tabId = params.tabId || targetTabId;
+      const tabId = params.tabId || activeMcpTabId;
+      if (!tabId) throw new Error("No active tab to untarget.");
       await removeTabFromMcpGroup(tabId);
       return { success: true, tabId, message: `Untargeted tab #${tabId} and detached DevTools Protocol.` };
     }
@@ -1275,8 +1344,9 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
         } catch (e) {}
       }
 
-      if (tabs.length === 0) {
-        tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      if (tabs.length === 0 && activeMcpTabId) {
+        const activeTab = await chrome.tabs.get(activeMcpTabId).catch(() => null);
+        if (activeTab) tabs = [activeTab];
       }
 
       return {
@@ -1295,12 +1365,14 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
     case "tabs_close": {
       const targetId = params.tabId || activeMcpTabId;
       if (!targetId) throw new Error("No tabId provided to close.");
-      if (mcpGroupId !== null) {
-        const tab = await chrome.tabs.get(targetId).catch(() => null);
-        if (tab && tab.groupId !== mcpGroupId) {
-          throw new Error(`Tab ${targetId} is not in the AutoResume MCP tab group. Refusing to close.`);
-        }
+      if (!mcpGroupId) {
+        throw new Error("No active AutoResume MCP tab group exists. Refusing to close unconfined tab.");
       }
+      const tab = await chrome.tabs.get(targetId).catch(() => null);
+      if (!tab || tab.groupId !== mcpGroupId) {
+        throw new Error(`Tab ${targetId} is not in the AutoResume MCP tab group. Refusing to close.`);
+      }
+      await detachDebugger(targetId);
       await chrome.tabs.remove(targetId);
       return { success: true, message: `Closed tab ${targetId}` };
     }
@@ -1434,6 +1506,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === "GET_STATE" || msg.type === "ACQUIRE_ACTIVE_TAB") {
     (async () => {
+      if (!isConnectedToBridge) {
+        connectWebSocketBridge();
+      }
       await verifyTabConfinement(null);
       sendResponse({
         stats: sessionStats,

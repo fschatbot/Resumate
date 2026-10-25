@@ -109,6 +109,28 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (state) applyTelemetryState(state);
   });
 
+  // Make bridge badge clickable for immediate manual reconnect
+  if (bridgeBadge) {
+    bridgeBadge.style.cursor = 'pointer';
+    bridgeBadge.title = 'Click to reconnect bridge';
+    bridgeBadge.addEventListener('click', () => {
+      if (bridgeStatusText) bridgeStatusText.textContent = 'Connecting...';
+      chrome.runtime.sendMessage({ type: "RECONNECT_BRIDGE" }, () => {
+        chrome.runtime.sendMessage({ type: "GET_STATE" }, (state) => {
+          if (state) applyTelemetryState(state);
+        });
+      });
+    });
+  }
+
+  // Periodic polling interval to keep background active and automatically reconnect when offline
+  setInterval(() => {
+    chrome.runtime.sendMessage({ type: "GET_STATE" }, (state) => {
+      if (chrome.runtime.lastError) return;
+      if (state) applyTelemetryState(state);
+    });
+  }, 2500);
+
   // Load dynamically stored files and preferences
   await loadStoredFiles();
 });
@@ -263,38 +285,67 @@ function applyTelemetryState(state) {
 // ============================================================================
 
 function renderToolFeed(items) {
-  toolListContainer.innerHTML = '';
-
-  if (items.length === 0) {
-    const emptyNotice = document.createElement('div');
-    emptyNotice.className = 'empty-state';
-    emptyNotice.innerHTML = `
-      <svg class="empty-icon" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
-      </svg>
-      <p class="empty-title">Awaiting Agent Actions</p>
-      <span class="empty-desc">Tool calls executed by external desktop AI (Claude, Cursor, agy) will stream live here.</span>
-    `;
-    toolListContainer.appendChild(emptyNotice);
+  if (!items || items.length === 0) {
+    if (!toolListContainer.querySelector('.empty-state')) {
+      toolListContainer.innerHTML = '';
+      const emptyNotice = document.createElement('div');
+      emptyNotice.className = 'empty-state';
+      emptyNotice.innerHTML = `
+        <svg class="empty-icon" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+        </svg>
+        <p class="empty-title">Awaiting Agent Actions</p>
+        <span class="empty-desc">Tool calls executed by external desktop AI (Claude, Cursor, agy) will stream live here.</span>
+      `;
+      toolListContainer.appendChild(emptyNotice);
+    }
     return;
   }
 
-  items.forEach(item => {
-    if (item.tool === 'browser_batch') {
-      renderBatchContainer(item);
+  // Remove empty notice if present
+  const emptyNotice = toolListContainer.querySelector('.empty-state');
+  if (emptyNotice) {
+    emptyNotice.remove();
+  }
+
+  // Reconcile items incrementally without wiping the container
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const itemId = String(item.id || `item_${item.timestamp || i}`);
+    let card = toolListContainer.querySelector(`[data-tool-id="${itemId}"]`);
+
+    if (!card) {
+      if (item.tool === 'browser_batch') {
+        card = createBatchContainer(item, itemId);
+      } else {
+        card = createRegularToolCard(item, itemId);
+      }
+
+      // Maintain order (newest first)
+      const nextItem = items[i + 1];
+      const nextEl = nextItem ? toolListContainer.querySelector(`[data-tool-id="${String(nextItem.id || `item_${nextItem.timestamp || (i + 1)}`)}"]`) : null;
+      if (nextEl) {
+        toolListContainer.insertBefore(card, nextEl);
+      } else {
+        toolListContainer.appendChild(card);
+      }
     } else {
-      renderRegularToolCard(item);
+      if (item.tool === 'browser_batch') {
+        updateBatchContainer(card, item);
+      } else {
+        updateRegularToolCard(card, item);
+      }
     }
-  });
+  }
 }
 
-function renderBatchContainer(item) {
+function createBatchContainer(item, itemId) {
   const container = document.createElement('div');
   const statusClass = (item.status || 'running').toLowerCase();
   const statusLabel = (item.status || 'RUNNING').toUpperCase();
 
-  // Container is marked expanded by default so inner individual tools are immediately visible
   container.className = `batch-group-container ${statusClass} expanded`;
+  container.setAttribute('data-tool-id', itemId);
 
   const timestamp = new Date(item.timestamp);
   const fullDate = timestamp.toLocaleString();
@@ -305,8 +356,6 @@ function renderBatchContainer(item) {
   }
 
   const actions = item.params?.actions || [];
-  const stepResults = item.stepReports || item.result?.steps || [];
-  const currentStepIdx = item.currentStep !== undefined ? item.currentStep : stepResults.length;
   const batchStepCount = actions.length;
 
   container.innerHTML = `
@@ -319,14 +368,14 @@ function renderBatchContainer(item) {
         </div>
       </div>
       <div class="batch-group-right">
-        ${durationText ? `<span class="duration-badge">${durationText}</span>` : ''}
+        <span class="duration-badge">${durationText}</span>
         <span class="status-badge ${escapeHtml(statusClass)}">${statusLabel}</span>
         <span class="batch-chevron-toggle">${CHEVRON_ICON}</span>
       </div>
     </div>
     <div class="batch-group-body">
       <div class="batch-timestamp">${escapeHtml(fullDate)}</div>
-      ${item.error ? `<div class="error-banner"><strong>Batch Error:</strong> ${escapeHtml(item.error)}</div>` : ''}
+      <div class="batch-error-placeholder"></div>
       <div class="batch-inner-tools-list"></div>
     </div>
   `;
@@ -340,6 +389,84 @@ function renderBatchContainer(item) {
   const innerToolsList = container.querySelector('.batch-inner-tools-list');
 
   actions.forEach((act, idx) => {
+    const stepIcon = LUCIDE_ICONS[act.tool] || LUCIDE_ICONS.default;
+    const innerCard = document.createElement('div');
+    innerCard.className = `batch-inner-card queued`;
+    innerCard.setAttribute('data-step-idx', String(idx));
+
+    innerCard.innerHTML = `
+      <div class="batch-inner-card-header">
+        <div class="batch-inner-card-left">
+          <span class="step-num">#${idx + 1}</span>
+          <span class="tool-icon-wrapper">${stepIcon}</span>
+          <span class="tool-name">${escapeHtml(act.tool)}</span>
+        </div>
+        <div class="batch-inner-card-right">
+          <span class="duration-badge"></span>
+          <span class="status-badge queued">QUEUED</span>
+          ${CHEVRON_ICON}
+        </div>
+      </div>
+      <div class="batch-inner-card-body">
+        <div class="code-box">${escapeHtml(JSON.stringify(act.params || {}, null, 2))}</div>
+        <div class="step-error-container"></div>
+        <div class="step-result-container"></div>
+      </div>
+    `;
+
+    innerCard.addEventListener('click', (e) => {
+      e.stopPropagation();
+      innerCard.classList.toggle('expanded');
+    });
+
+    innerToolsList.appendChild(innerCard);
+  });
+
+  updateBatchContainer(container, item);
+  return container;
+}
+
+function updateBatchContainer(container, item) {
+  const statusClass = (item.status || 'running').toLowerCase();
+  const statusLabel = (item.status || 'RUNNING').toUpperCase();
+
+  container.classList.remove('running', 'success', 'error');
+  container.classList.add(statusClass);
+
+  const statusBadge = container.querySelector('.batch-group-header .status-badge');
+  if (statusBadge) {
+    statusBadge.className = `status-badge ${escapeHtml(statusClass)}`;
+    statusBadge.textContent = statusLabel;
+  }
+
+  const durationBadge = container.querySelector('.batch-group-header .duration-badge');
+  if (durationBadge) {
+    if (item.duration !== undefined) {
+      durationBadge.textContent = item.duration < 1000 ? `${item.duration}ms` : `${(item.duration / 1000).toFixed(1)}s`;
+      durationBadge.style.display = 'inline-block';
+    } else {
+      durationBadge.textContent = '';
+      durationBadge.style.display = 'none';
+    }
+  }
+
+  const errorPlaceholder = container.querySelector('.batch-error-placeholder');
+  if (errorPlaceholder) {
+    if (item.error) {
+      errorPlaceholder.innerHTML = `<div class="error-banner"><strong>Batch Error:</strong> ${escapeHtml(item.error)}</div>`;
+    } else {
+      errorPlaceholder.innerHTML = '';
+    }
+  }
+
+  const actions = item.params?.actions || [];
+  const stepResults = item.stepReports || item.result?.steps || [];
+  const currentStepIdx = item.currentStep !== undefined ? item.currentStep : stepResults.length;
+
+  actions.forEach((act, idx) => {
+    const innerCard = container.querySelector(`.batch-inner-card[data-step-idx="${idx}"]`);
+    if (!innerCard) return;
+
     const stepRes = stepResults[idx];
     let stepStatus = 'QUEUED';
     if (stepRes) {
@@ -358,85 +485,58 @@ function renderBatchContainer(item) {
       stepStatus = 'SUCCESS';
     }
 
-    const stepStatusClass = stepStatus.toLowerCase();
-    let stepDurationText = '';
-    if (stepRes && stepRes.duration !== undefined) {
-      stepDurationText = stepRes.duration < 1000 ? `${stepRes.duration}ms` : `${(stepRes.duration / 1000).toFixed(1)}s`;
+    const stepClass = stepStatus.toLowerCase();
+    innerCard.classList.remove('running', 'success', 'error', 'failed', 'queued');
+    innerCard.classList.add(stepClass);
+
+    const innerBadge = innerCard.querySelector('.status-badge');
+    if (innerBadge) {
+      innerBadge.className = `status-badge ${escapeHtml(stepClass)}`;
+      innerBadge.textContent = stepStatus;
     }
 
-    const stepIcon = LUCIDE_ICONS[act.tool] || LUCIDE_ICONS.default;
-
-    const innerCard = document.createElement('div');
-    innerCard.className = `batch-inner-card ${stepStatusClass}`;
-
-    let stepErrorHtml = '';
-    if (stepRes && stepRes.error) {
-      stepErrorHtml = `<div class="error-banner"><strong>Error:</strong> ${escapeHtml(stepRes.error)}</div>`;
+    const innerDur = innerCard.querySelector('.duration-badge');
+    if (innerDur) {
+      if (stepRes && stepRes.duration !== undefined) {
+        innerDur.textContent = stepRes.duration < 1000 ? `${stepRes.duration}ms` : `${(stepRes.duration / 1000).toFixed(1)}s`;
+        innerDur.style.display = 'inline-block';
+      } else {
+        innerDur.textContent = '';
+        innerDur.style.display = 'none';
+      }
     }
 
-    let stepResultHtml = '';
-    if (stepRes && stepRes.result && typeof stepRes.result === 'object' && Object.keys(stepRes.result).length > 0) {
-      stepResultHtml = `<div class="step-result-snippet"><strong>Result:</strong> ${escapeHtml(JSON.stringify(stepRes.result, null, 2))}</div>`;
+    const errBox = innerCard.querySelector('.step-error-container');
+    if (errBox) {
+      if (stepRes && stepRes.error) {
+        errBox.innerHTML = `<div class="error-banner"><strong>Error:</strong> ${escapeHtml(stepRes.error)}</div>`;
+      } else {
+        errBox.innerHTML = '';
+      }
     }
 
-    innerCard.innerHTML = `
-      <div class="batch-inner-card-header">
-        <div class="batch-inner-card-left">
-          <span class="step-num">#${idx + 1}</span>
-          <span class="tool-icon-wrapper">${stepIcon}</span>
-          <span class="tool-name">${escapeHtml(act.tool)}</span>
-        </div>
-        <div class="batch-inner-card-right">
-          ${stepDurationText ? `<span class="duration-badge">${stepDurationText}</span>` : ''}
-          <span class="status-badge ${escapeHtml(stepStatusClass)}">${escapeHtml(stepStatus)}</span>
-          ${CHEVRON_ICON}
-        </div>
-      </div>
-      <div class="batch-inner-card-body">
-        <div class="code-box">${escapeHtml(JSON.stringify(act.params || {}, null, 2))}</div>
-        ${stepErrorHtml}
-        ${stepResultHtml}
-      </div>
-    `;
-
-    // Inner card click toggles its own body
-    innerCard.addEventListener('click', (e) => {
-      e.stopPropagation();
-      innerCard.classList.toggle('expanded');
-    });
-
-    innerToolsList.appendChild(innerCard);
+    const resBox = innerCard.querySelector('.step-result-container');
+    if (resBox) {
+      if (stepRes && stepRes.result && typeof stepRes.result === 'object' && Object.keys(stepRes.result).length > 0) {
+        resBox.innerHTML = `<div class="step-result-snippet"><strong>Result:</strong> ${escapeHtml(JSON.stringify(stepRes.result, null, 2))}</div>`;
+      } else {
+        resBox.innerHTML = '';
+      }
+    }
   });
-
-  toolListContainer.appendChild(container);
 }
 
-function renderRegularToolCard(item) {
+function createRegularToolCard(item, itemId) {
   const card = document.createElement('div');
   const statusClass = (item.status || 'running').toLowerCase();
   const statusLabel = (item.status || 'RUNNING').toUpperCase();
 
   card.className = `tool-card ${statusClass}`;
+  card.setAttribute('data-tool-id', itemId);
 
   const timestamp = new Date(item.timestamp);
   const fullDate = timestamp.toLocaleString();
-
-  let durationText = '';
-  if (item.duration !== undefined) {
-    durationText = item.duration < 1000 ? `${item.duration}ms` : `${(item.duration / 1000).toFixed(1)}s`;
-  }
-
   const toolIcon = LUCIDE_ICONS[item.tool] || LUCIDE_ICONS.default;
-
-  let screenshotHtml = '';
-  if (item.result?.screenshotBase64) {
-    screenshotHtml = `
-      <a class="screenshot-preview-btn" href="#">
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-        View Captured Screenshot
-      </a>
-    `;
-  }
 
   card.innerHTML = `
     <div class="tool-card-header">
@@ -445,7 +545,7 @@ function renderRegularToolCard(item) {
         <span class="tool-name">${escapeHtml(item.tool)}</span>
       </div>
       <div class="tool-card-right">
-        ${durationText ? `<span class="duration-badge">${durationText}</span>` : ''}
+        <span class="duration-badge"></span>
         <span class="status-badge ${escapeHtml(statusClass)}">${statusLabel}</span>
         ${CHEVRON_ICON}
       </div>
@@ -453,12 +553,11 @@ function renderRegularToolCard(item) {
     <div class="tool-card-body">
       <div class="tool-timestamp">${escapeHtml(fullDate)}</div>
       <div class="code-box">${escapeHtml(JSON.stringify(item.params || {}, null, 2))}</div>
-      ${item.error ? `<div class="error-banner"><strong>Error:</strong> ${escapeHtml(item.error)}</div>` : ''}
-      ${screenshotHtml}
+      <div class="tool-error-placeholder"></div>
+      <div class="tool-screenshot-placeholder"></div>
     </div>
   `;
 
-  // Click anywhere on card to toggle expansion
   card.addEventListener('click', (e) => {
     if (e.target.closest('.screenshot-preview-btn')) {
       e.preventDefault();
@@ -468,7 +567,56 @@ function renderRegularToolCard(item) {
     card.classList.toggle('expanded');
   });
 
-  toolListContainer.appendChild(card);
+  updateRegularToolCard(card, item);
+  return card;
+}
+
+function updateRegularToolCard(card, item) {
+  const statusClass = (item.status || 'running').toLowerCase();
+  const statusLabel = (item.status || 'RUNNING').toUpperCase();
+
+  card.classList.remove('running', 'success', 'error');
+  card.classList.add(statusClass);
+
+  const badge = card.querySelector('.tool-card-header .status-badge');
+  if (badge) {
+    badge.className = `status-badge ${escapeHtml(statusClass)}`;
+    badge.textContent = statusLabel;
+  }
+
+  const dur = card.querySelector('.tool-card-header .duration-badge');
+  if (dur) {
+    if (item.duration !== undefined) {
+      dur.textContent = item.duration < 1000 ? `${item.duration}ms` : `${(item.duration / 1000).toFixed(1)}s`;
+      dur.style.display = 'inline-block';
+    } else {
+      dur.textContent = '';
+      dur.style.display = 'none';
+    }
+  }
+
+  const errBox = card.querySelector('.tool-error-placeholder');
+  if (errBox) {
+    if (item.error) {
+      errBox.innerHTML = `<div class="error-banner"><strong>Error:</strong> ${escapeHtml(item.error)}</div>`;
+    } else {
+      errBox.innerHTML = '';
+    }
+  }
+
+  const scBox = card.querySelector('.tool-screenshot-placeholder');
+  if (scBox) {
+    if (item.result?.screenshotBase64) {
+      scBox.innerHTML = `
+        <a class="screenshot-preview-btn" href="#">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+          View Captured Screenshot
+        </a>
+      `;
+    } else {
+      scBox.innerHTML = '';
+    }
+  }
 }
 
 function showTooltip(e) {

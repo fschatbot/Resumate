@@ -238,6 +238,21 @@ async function handleJsonRpcRequest(request) {
             executionResult = handleListFiles();
           } else if (toolName === "read_file") {
             executionResult = handleReadFile(resolvedArgs);
+          } else if (toolName === "get_tool_definitions") {
+            if (resolvedArgs.toolName) {
+              const found = TOOL_CATALOG.find(t => t.name.toLowerCase() === String(resolvedArgs.toolName).toLowerCase());
+              executionResult = found || { error: `Tool '${resolvedArgs.toolName}' not found in catalog.` };
+            } else {
+              executionResult = {
+                count: TOOL_CATALOG.length,
+                tools: TOOL_CATALOG.map(t => ({
+                  name: t.name,
+                  description: t.description,
+                  parameters: t.inputSchema?.properties || {},
+                  required: t.inputSchema?.required || []
+                }))
+              };
+            }
           } else {
             // Browser automation tools routed to extension bridge
             executionResult = await bridge.executeTool(toolName, resolvedArgs);
