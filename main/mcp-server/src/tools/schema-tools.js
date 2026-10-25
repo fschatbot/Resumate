@@ -4,7 +4,8 @@ import {
   getLoadedPreferences,
   hasPreferences,
   getNestedProperty,
-  getPreferencesSource
+  getPreferencesSource,
+  clearPreferences
 } from '../utils/template-resolver.js';
 
 // In-memory registry of files uploaded by the user or registered by the AI agent
@@ -62,6 +63,19 @@ export function handleSetPreferences(args = {}) {
 }
 
 /**
+ * Clears applicant preferences from memory and notifies the extension.
+ */
+export function handleClearPreferences() {
+  clearPreferences();
+  if (syncCallback) {
+    try {
+      syncCallback('preferences_cleared', {});
+    } catch (err) {}
+  }
+  return { success: true, message: "Preferences cleared from session memory." };
+}
+
+/**
  * Validates preferences structure against the schema.
  * @param {object} args
  * @param {object} [args.preferences] - Custom preferences payload to validate
@@ -96,6 +110,7 @@ export function handleValidatePreferencesSchema(args = {}) {
 
 /**
  * Updates or merges new user data into a specific section of active preferences.
+ * Deduplicates arrays to avoid duplicate entries when re-merging.
  * @param {object} args
  * @param {string} args.section - Target section (e.g. "customQA", "general", "education")
  * @param {any} args.data - Data payload to merge or set
@@ -120,7 +135,28 @@ export function handleUpdatePreferencesSection(args) {
     if (overwrite) {
       current[section] = data;
     } else {
-      current[section].push(...data);
+      // Deduplicate when appending to arrays
+      const existing = current[section];
+      for (const item of data) {
+        let isDuplicate = false;
+        if (typeof item === 'object' && item !== null) {
+          if (section === 'experience' && item.company && item.role) {
+            isDuplicate = existing.some(e => e.company?.toLowerCase() === item.company.toLowerCase() && e.role?.toLowerCase() === item.role.toLowerCase());
+          } else if (section === 'education' && item.institution) {
+            isDuplicate = existing.some(e => e.institution?.toLowerCase() === item.institution.toLowerCase());
+          } else if ((section === 'projects' || section === 'awards') && item.title) {
+            isDuplicate = existing.some(e => e.title?.toLowerCase() === item.title.toLowerCase());
+          } else {
+            isDuplicate = existing.some(e => JSON.stringify(e) === JSON.stringify(item));
+          }
+        } else {
+          isDuplicate = existing.includes(item);
+        }
+
+        if (!isDuplicate) {
+          existing.push(item);
+        }
+      }
     }
   } else if (
     typeof current[section] === 'object' && current[section] !== null && !Array.isArray(current[section]) &&
@@ -141,7 +177,8 @@ export function handleUpdatePreferencesSection(args) {
     throw new Error(`Failed to update section '${section}' because the resulting data violates schema: ${validation.errors.join('; ')}`);
   }
 
-  setPreferences(current, getPreferencesSource() || 'agent');
+  const activeSource = getPreferencesSource();
+  setPreferences(current, activeSource);
 
   // Sync to Chrome Extension if connected
   if (syncCallback) {
@@ -196,11 +233,14 @@ export function handleGetPreferences(args = {}) {
 /**
  * Stores or registers a file (e.g. resume PDF/MD) into the session file storage.
  * Synchronizes immediately with the Chrome Extension so file_upload can access it.
+ * Normalizes mimeType and type so both match across extension and server.
  * @param {object} args
  * @param {string} args.name - Filename (e.g. "Resume.pdf")
  * @param {string} [args.data] - Base64 encoded file content
- * @param {string} [args.mimeType] - MIME type (e.g. "application/pdf")
+ * @param {string} [args.mimeType] - MIME type
+ * @param {string} [args.type] - Fallback MIME type from extension
  * @param {string} [args.description] - File description
+ * @param {string} [args.size] - File size string
  * @returns {object}
  */
 export function handleStoreFile(args = {}) {
@@ -208,10 +248,14 @@ export function handleStoreFile(args = {}) {
     throw new Error("Missing required argument: 'name'");
   }
 
+  const normalizedMime = args.mimeType || args.type || (args.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : (args.name.toLowerCase().endsWith('.json') ? 'application/json' : 'text/plain'));
+
   const fileEntry = {
     name: args.name,
     data: args.data || null,
-    mimeType: args.mimeType || (args.name.endsWith('.pdf') ? 'application/pdf' : 'text/plain'),
+    mimeType: normalizedMime,
+    type: normalizedMime,
+    size: args.size || (args.data ? `${Math.round(args.data.length * 0.75 / 1024)} KB` : 'Unknown'),
     description: args.description || 'User provided file',
     uploadedAt: new Date().toISOString()
   };
@@ -235,6 +279,22 @@ export function handleStoreFile(args = {}) {
 }
 
 /**
+ * Deletes a file from session storage.
+ * @param {string} fileName
+ * @returns {object}
+ */
+export function handleDeleteFile(fileName) {
+  if (!fileName) throw new Error("Missing fileName parameter.");
+  const deleted = sessionFiles.delete(fileName);
+  if (syncCallback) {
+    try {
+      syncCallback('file_deleted', { name: fileName });
+    } catch (err) {}
+  }
+  return { success: deleted, message: deleted ? `File '${fileName}' deleted from session.` : `File '${fileName}' not found.` };
+}
+
+/**
  * Lists all files currently available in session storage.
  * @returns {object}
  */
@@ -242,6 +302,8 @@ export function handleListFiles() {
   const files = Array.from(sessionFiles.values()).map(f => ({
     name: f.name,
     mimeType: f.mimeType,
+    type: f.mimeType,
+    size: f.size,
     description: f.description,
     hasData: Boolean(f.data),
     uploadedAt: f.uploadedAt
@@ -256,8 +318,11 @@ export function handleListFiles() {
 
 /**
  * Reads the text/data content of an uploaded or stored file.
+ * Returns text extracts without dumping multi-megabyte base64 into agent context
+ * unless explicitly requested via `includeBase64: true`.
  * @param {object} args
  * @param {string} args.name - Filename
+ * @param {boolean} [args.includeBase64=false] - Whether to include raw base64 data
  * @returns {object}
  */
 export function handleReadFile(args = {}) {
@@ -272,37 +337,69 @@ export function handleReadFile(args = {}) {
   }
 
   let textContent = null;
+  let byteSize = 0;
+
   if (file.data) {
     try {
       let base64Clean = file.data.replace(/^data:[^;]+;base64,/, '').trim();
       base64Clean = base64Clean.replace(/-/g, '+').replace(/_/g, '/');
       while (base64Clean.length % 4) base64Clean += '=';
       const buf = Buffer.from(base64Clean, 'base64');
+      byteSize = buf.length;
 
       if (file.name.endsWith('.md') || file.name.endsWith('.json') || file.name.endsWith('.txt') || file.mimeType?.includes('text') || file.mimeType?.includes('json')) {
         textContent = buf.toString('utf8');
       } else if (file.name.endsWith('.pdf') || file.mimeType?.includes('pdf')) {
-        // Extract readable ASCII/Latin text streams from PDF
+        // Robust PDF text extraction (matching Tj, TJ arrays, and readable strings in BT...ET blocks)
         const raw = buf.toString('latin1');
-        const matches = [...raw.matchAll(/\(([^)]{2,})\)\s*Tj/g)].map(m => m[1]);
-        if (matches.length > 0) {
-          textContent = matches.join(' ');
+        const extracted = [];
+
+        // Match BT ... ET blocks
+        const btBlocks = raw.match(/BT[\s\S]*?ET/g) || [];
+        for (const block of btBlocks) {
+          // Match (string) Tj
+          const tjMatches = [...block.matchAll(/\(([^)]{1,})\)\s*Tj/g)].map(m => m[1]);
+          if (tjMatches.length > 0) extracted.push(...tjMatches);
+
+          // Match [(string) num (string)] TJ
+          const arrayMatches = [...block.matchAll(/\[(.*?)\]\s*TJ/g)];
+          for (const arr of arrayMatches) {
+            const inner = [...arr[1].matchAll(/\(([^)]{1,})\)/g)].map(m => m[1]);
+            if (inner.length > 0) extracted.push(inner.join(''));
+          }
+        }
+
+        if (extracted.length > 0) {
+          textContent = extracted.join(' ').replace(/\\([()\\])/g, '$1').replace(/\s+/g, ' ').trim();
         } else {
-          textContent = `[Binary PDF file: ${file.name}, size: ${buf.length} bytes. Base64 content is stored and ready for file_upload.]`;
+          // General ASCII fallback
+          const asciiMatches = [...raw.matchAll(/\(([^)]{2,})\)/g)].map(m => m[1]).filter(s => /^[a-zA-Z0-9\s.,;:'"()@/\\-_]{3,}$/.test(s));
+          if (asciiMatches.length > 0) {
+            textContent = asciiMatches.join(' ').replace(/\s+/g, ' ').trim();
+          } else {
+            textContent = `[PDF Document: ${file.name} (${Math.round(byteSize / 1024)} KB). Binary content ready for file_upload.]`;
+          }
         }
       }
     } catch (e) {
-      textContent = `[Failed to decode text: ${e.message}]`;
+      textContent = `[Failed to decode file text: ${e.message}]`;
     }
   }
 
-  return {
+  const result = {
     success: true,
     name: file.name,
     mimeType: file.mimeType,
     description: file.description,
     hasData: Boolean(file.data),
-    text: textContent,
-    data: file.data
+    size: file.size || `${Math.round(byteSize / 1024)} KB`,
+    text: textContent
   };
+
+  // Only return base64 if explicitly requested to avoid overflowing LLM context window
+  if (args.includeBase64) {
+    result.data = file.data;
+  }
+
+  return result;
 }

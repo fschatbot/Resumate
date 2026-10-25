@@ -61,7 +61,7 @@
         'value', 'checked', 'selected', 'disabled', 'readonly', 'required',
         'aria-expanded', 'aria-checked', 'aria-selected', 'aria-disabled',
         'aria-hidden', 'aria-invalid', 'aria-label', 'aria-valuenow',
-        'aria-activedescendant', 'placeholder', 'open', 'hidden', 'class', 'style'
+        'aria-activedescendant', 'placeholder', 'open', 'hidden'
       ]
     });
   } catch (e) {
@@ -102,9 +102,11 @@
     let text = cleanText(rawLabel, 220);
     let impliesRequired = false;
 
-    if (/(?:\s*\*+\s*|\s*\(required\)\s*|\s*required\s*\*?)$/i.test(text)) {
+    // Only match explicit asterisks (*), (required), [required], or trailing ": *"
+    // Do NOT match labels merely ending in the English word "required" (e.g. "Experience Required")
+    if (/(?:\s*\*+\s*|\s*\(required\)\s*|\s*\[required\]\s*)$/i.test(text)) {
       impliesRequired = true;
-      text = text.replace(/(?:\s*\*+\s*|\s*\(required\)\s*)$/i, '').trim();
+      text = text.replace(/(?:\s*\*+\s*|\s*\(required\)\s*|\s*\[required\]\s*)$/i, '').trim();
     } else if (/^\*\s+/.test(text)) {
       impliesRequired = true;
       text = text.replace(/^\*\s+/, '').trim();
@@ -306,7 +308,8 @@
 
     if (
       el.hasAttribute('onclick') ||
-      el.onclick !== null ||
+      el.hasAttribute('data-action') ||
+      el.hasAttribute('jsaction') ||
       (el.getAttribute('tabindex') === '0' && !['DIV', 'SPAN', 'SECTION', 'MAIN'].includes(tag))
     ) {
       return { role: 'button', subtype: null };

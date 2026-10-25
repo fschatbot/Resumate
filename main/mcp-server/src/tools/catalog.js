@@ -687,6 +687,17 @@ export const TOOL_CATALOG = [
 			required: ["name"],
 		},
 	},
+	{
+		name: "delete_file",
+		description: "Deletes an uploaded or registered file from session storage and notifies the extension.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				name: { type: "string", description: "Name of the file to delete (e.g. 'Resume.pdf')." },
+			},
+			required: ["name"],
+		},
+	},
 ];
 
 export const TOOLS_BY_NAME = new Map(TOOL_CATALOG.map((tool) => [tool.name, tool]));

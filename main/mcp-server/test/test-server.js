@@ -7,7 +7,9 @@ import {
   handleGetPreferences,
   handleStoreFile,
   handleListFiles,
-  handleReadFile
+  handleReadFile,
+  handleDeleteFile,
+  handleClearPreferences
 } from '../src/tools/schema-tools.js';
 import { resolveTemplateVariables } from '../src/utils/template-resolver.js';
 import { AXTreeTracker } from '../src/utils/ax-tree-tracker.js';
@@ -168,15 +170,15 @@ console.log('✓ AXTreeTracker delta diff detection (+added, ~changed) passed.')
 // Test minimal response formatting with delta
 const formattedAction = tracker.formatActionResultWithDelta('browser_click', { success: true, message: 'Clicked @e14' }, secondDelta);
 assert.ok(formattedAction.startsWith('Clicked @e14'));
-assert.ok(formattedAction.includes('[DOM Mutation Detected]'));
-assert.ok(formattedAction.includes('Changed Elements:'));
+assert.ok(formattedAction.includes('[DOM Mutation Delta |'), `Expected delta header, got: "${formattedAction}"`);
+assert.ok(formattedAction.includes('Shipping Method'), 'Delta text should mention modified element');
 console.log('✓ Minimal tool result formatting with delta passed.');
 
 // Test clean status when no DOM mutations occur
 const unmutatedDelta = tracker.updatePageState(mutatedSnapshot);
 assert.equal(unmutatedDelta.hasChanges, false);
 const cleanAction = tracker.formatActionResultWithDelta('browser_click', { success: true, message: 'Clicked @e14' }, unmutatedDelta);
-assert.equal(cleanAction, 'Clicked @e14 No DOM mutations detected.');
+assert.equal(cleanAction, 'Clicked @e14 [No DOM mutations]');
 console.log('✓ Minimal tool result without DOM mutations passed.');
 
 // Test MCP Resource text generation
@@ -184,5 +186,95 @@ const resourceText = tracker.getInteractiveElementsResource();
 assert.ok(resourceText.includes('Job Application'));
 assert.ok(resourceText.includes('@e10 -> textbox'));
 console.log('✓ Interactive elements resource formatting passed.');
+
+// 10. Test Preference Location & Legal Aliases
+const sampleWithLegal = {
+  ...samplePreferences,
+  general: {
+    ...samplePreferences.general,
+    address: {
+      city: "San Francisco",
+      state: "CA",
+      country: "United States"
+    }
+  },
+  demographicsAndLegal: {
+    workAuthorizationType: "US Citizen",
+    authorizedInUS: true,
+    requiresSponsorship: false
+  }
+};
+handleSetPreferences({ preferences: sampleWithLegal, source: 'test' });
+
+const aliasCity = resolveTemplateVariables("${preferences.general.location.city}");
+assert.equal(aliasCity, "San Francisco", "general.location.city should resolve to general.address.city alias");
+
+const aliasAuth = resolveTemplateVariables("${preferences.workAuthorization.authorizedInUS}");
+assert.equal(aliasAuth, true, "workAuthorization.authorizedInUS should resolve to demographicsAndLegal alias");
+console.log('✓ Preference template convenience aliases (location, workAuthorization) passed.');
+
+// 11. Test Missing Critical/Legal Field Throws Error
+assert.throws(() => {
+  resolveTemplateVariables("${preferences.demographicsAndLegal.nonExistentField}");
+}, /could not be resolved: property.*is missing or undefined/, "Missing legal/critical field should throw descriptive error instead of silently blanking.");
+console.log('✓ Missing critical/legal preference property throws descriptive error.');
+
+// 12. Test Array Deduplication in handleUpdatePreferencesSection
+handleUpdatePreferencesSection({
+  section: "education",
+  data: [
+    {
+      institution: "Stanford University",
+      degree: "B.S.",
+      major: "Computer Science",
+      graduationDate: "2024"
+    },
+    {
+      institution: "MIT",
+      degree: "M.S.",
+      major: "AI",
+      graduationDate: "2026"
+    }
+  ]
+});
+const updatedPrefs = handleGetPreferences();
+assert.equal(updatedPrefs.data.education.length, 2, "Duplicate education entry should not be appended twice");
+console.log('✓ Array deduplication in handleUpdatePreferencesSection passed.');
+
+// 13. Test File Deletion
+const deleteFileRes = handleDeleteFile("Resume.pdf");
+assert.equal(deleteFileRes.success, true);
+const remainingFiles = handleListFiles();
+assert.equal(remainingFiles.files.some(f => f.name === "Resume.pdf"), false);
+console.log('✓ handleDeleteFile passed.');
+
+// 14. Test Preferences Clearing
+const clearRes = handleClearPreferences();
+assert.equal(clearRes.success, true);
+assert.throws(() => handleGetPreferences(), /Preferences have not been provided yet/);
+console.log('✓ handleClearPreferences passed.');
+
+// 15. Test AXTreeTracker Per-Tab Isolation
+const multiTabTracker = new AXTreeTracker();
+multiTabTracker.updatePageState({
+  title: "Tab 101 Page",
+  url: "https://example.com/101",
+  interactiveCount: 1,
+  totalNodes: 5,
+  compactTree: '@e1 -> textbox "Search 101"'
+}, 101);
+
+multiTabTracker.updatePageState({
+  title: "Tab 202 Page",
+  url: "https://example.com/202",
+  interactiveCount: 2,
+  totalNodes: 8,
+  compactTree: '@e1 -> button "Submit 202"'
+}, 202);
+
+assert.ok(multiTabTracker.getInteractiveElementsResource(101).includes("Search 101"));
+assert.ok(multiTabTracker.getInteractiveElementsResource(202).includes("Submit 202"));
+assert.ok(!multiTabTracker.getInteractiveElementsResource(101).includes("Submit 202"));
+console.log('✓ AXTreeTracker per-tab isolation passed.');
 
 console.log('\nAll AutoResume MCP tests passed successfully!');

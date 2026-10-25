@@ -27,7 +27,7 @@ export function getLoadedPreferences() {
  * @returns {string}
  */
 export function getPreferencesSource() {
-  return preferencesSource;
+  return (preferencesSource && preferencesSource !== 'none') ? preferencesSource : 'agent';
 }
 
 /**
@@ -43,7 +43,7 @@ export function setPreferences(preferencesData, source = 'agent', persistPath = 
   }
 
   activePreferences = preferencesData;
-  preferencesSource = source;
+  preferencesSource = (source && source !== 'none') ? source : 'agent';
 
   if (persistPath) {
     try {

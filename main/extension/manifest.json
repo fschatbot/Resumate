@@ -26,37 +26,14 @@
   "permissions": [
     "sidePanel",
     "storage",
-    "activeTab",
     "scripting",
     "tabGroups",
     "tabs",
-    "webNavigation",
     "unlimitedStorage",
     "debugger"
   ],
   "host_permissions": [
     "<all_urls>"
-  ],
-  "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": [
-        "content-scripts/element-map.js",
-        "content-scripts/accessibility-tree.js",
-        "content-scripts/dom-interactor.js"
-      ],
-      "run_at": "document_start",
-      "all_frames": true
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": [
-        "icons/*",
-        "content-scripts/*"
-      ],
-      "matches": ["<all_urls>"]
-    }
   ],
   "commands": {
     "_execute_action": {

@@ -1,5 +1,9 @@
 /**
  * preferences/validator.js - Schema validation and template substitution for preferences.json
+ *
+ * NOTE: This file is a browser-compatible copy of preferences/validator.js required by the
+ * Chrome Extension Service Worker (background.js). Both files must be kept in sync.
+ * The mcp-server imports directly from preferences/validator.js (Node.js environment).
  */
 
 export const PREFERENCE_SECTIONS = [
@@ -10,11 +14,12 @@ export const PREFERENCE_SECTIONS = [
   "projects",
   "skills",
   "demographicsAndLegal",
+  "workAuthorization",
   "customQA"
 ];
 
 /**
- * Validates a preferences object or section.
+ * Validates a preferences object or section against the standardized schema.
  * @param {object} data - Full preferences object or section data
  * @param {string} [section] - Optional specific section to validate
  * @returns {{ valid: boolean, errors: string[] }}
@@ -26,23 +31,48 @@ export function validatePreferences(data, section = null) {
     return { valid: false, errors: ["Preferences payload must be provided."] };
   }
 
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const uriRegex = /^https?:\/\/[^\s$.?#].[^\s]*$/i;
+
   const validateGeneral = (gen) => {
     if (!gen || typeof gen !== "object" || Array.isArray(gen)) {
       errors.push("Missing or invalid 'general' section.");
       return;
     }
-    if (!gen.firstName) errors.push("general.firstName is required.");
-    if (!gen.lastName) errors.push("general.lastName is required.");
-    if (!gen.fullName) errors.push("general.fullName is required.");
-    if (!gen.email || !gen.email.includes("@")) errors.push("general.email must be a valid email address.");
+    if (!gen.firstName || typeof gen.firstName !== "string") errors.push("general.firstName is required.");
+    if (!gen.lastName || typeof gen.lastName !== "string") errors.push("general.lastName is required.");
+    if (!gen.fullName || typeof gen.fullName !== "string") errors.push("general.fullName is required.");
+    if (!gen.email || !emailRegex.test(gen.email.trim())) {
+      errors.push("general.email must be a valid email address (e.g. 'applicant@example.com').");
+    }
     if (!gen.phone || typeof gen.phone !== "object" || Array.isArray(gen.phone)) {
       errors.push("general.phone object is required.");
     } else {
-      if (!gen.phone.digits10 || !/^\d{10}$/.test(gen.phone.digits10)) {
-        errors.push("general.phone.digits10 must be exactly 10 digits.");
+      if (!gen.phone.digits10 || !/^\d{7,15}$/.test(String(gen.phone.digits10).trim())) {
+        errors.push("general.phone.digits10 must be a valid phone number (7 to 15 digits).");
       }
       if (!gen.phone.countryCode) errors.push("general.phone.countryCode is required.");
       if (!gen.phone.formatted) errors.push("general.phone.formatted is required.");
+    }
+
+    if (gen.links && typeof gen.links === "object" && !Array.isArray(gen.links)) {
+      for (const [key, linkVal] of Object.entries(gen.links)) {
+        if (linkVal && typeof linkVal === "string" && !uriRegex.test(linkVal.trim())) {
+          errors.push(`general.links.${key} must be a valid HTTP/HTTPS URL.`);
+        }
+      }
+    }
+
+    if (gen.knownLanguages && Array.isArray(gen.knownLanguages)) {
+      const validProficiencies = ["Native", "Fluent", "Professional", "Intermediate", "Basic"];
+      gen.knownLanguages.forEach((kl, idx) => {
+        if (!kl || typeof kl !== "object" || !kl.language) {
+          errors.push(`general.knownLanguages[${idx}].language is required.`);
+        }
+        if (kl && kl.proficiency && !validProficiencies.includes(kl.proficiency)) {
+          errors.push(`general.knownLanguages[${idx}].proficiency must be one of: ${validProficiencies.join(', ')}.`);
+        }
+      });
     }
   };
 
@@ -138,8 +168,51 @@ export function validatePreferences(data, section = null) {
     }
   };
 
+  const validateDemographicsAndLegal = (dem) => {
+    if (!dem || typeof dem !== "object" || Array.isArray(dem)) {
+      errors.push("demographicsAndLegal must be an object.");
+      return;
+    }
+    const booleanFields = [
+      "legallyAuthorizedToWork",
+      "requiresVisaSponsorship",
+      "authorizedInUS",
+      "requiresSponsorship",
+      "willRequireFutureSponsorship",
+      "isOver18"
+    ];
+    for (const bf of booleanFields) {
+      if (dem[bf] !== undefined && typeof dem[bf] !== "boolean") {
+        errors.push(`demographicsAndLegal.${bf} must be a boolean.`);
+      }
+    }
+    const stringFields = [
+      "workAuthorizationType",
+      "veteranStatus",
+      "disabilityStatus",
+      "gender",
+      "raceOrEthnicity"
+    ];
+    for (const sf of stringFields) {
+      if (dem[sf] !== undefined && typeof dem[sf] !== "string") {
+        errors.push(`demographicsAndLegal.${sf} must be a string.`);
+      }
+    }
+  };
+
+  const validateCustomQA = (qa) => {
+    if (!qa || typeof qa !== "object" || Array.isArray(qa)) {
+      errors.push("customQA must be an object of key-value questions and answers.");
+      return;
+    }
+    for (const [k, v] of Object.entries(qa)) {
+      if (v === null || (typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean")) {
+        errors.push(`customQA['${k}'] must be a string, number, or boolean.`);
+      }
+    }
+  };
+
   if (section) {
-    // If caller passed root object containing the section, unwrap it; otherwise use payload directly
     const sectionData = (typeof data === "object" && data !== null && !Array.isArray(data) && section in data)
       ? data[section]
       : data;
@@ -152,14 +225,11 @@ export function validatePreferences(data, section = null) {
       case "skills": validateSkills(sectionData); break;
       case "awards": validateAwards(sectionData); break;
       case "demographicsAndLegal":
-        if (typeof sectionData !== "object" || sectionData === null || Array.isArray(sectionData)) {
-          errors.push("demographicsAndLegal must be an object.");
-        }
+      case "workAuthorization":
+        validateDemographicsAndLegal(sectionData);
         break;
       case "customQA":
-        if (typeof sectionData !== "object" || sectionData === null || Array.isArray(sectionData)) {
-          errors.push("customQA must be an object.");
-        }
+        validateCustomQA(sectionData);
         break;
       default:
         errors.push(`Unknown preference section: '${section}'`);
@@ -174,6 +244,9 @@ export function validatePreferences(data, section = null) {
     validateProjects(data.projects);
     validateSkills(data.skills);
     if (data.awards !== undefined) validateAwards(data.awards);
+    if (data.demographicsAndLegal !== undefined) validateDemographicsAndLegal(data.demographicsAndLegal);
+    if (data.workAuthorization !== undefined) validateDemographicsAndLegal(data.workAuthorization);
+    if (data.customQA !== undefined) validateCustomQA(data.customQA);
   }
 
   return {
@@ -184,43 +257,74 @@ export function validatePreferences(data, section = null) {
 
 /**
  * Traverses an object using a dot/bracket notation path safely without prototype pollution.
- * Supports: "general.phone.digits10", "education[0].institution", "customQA['willing-to-relocate']"
+ * Supports automatic alias resolution:
+ * - general.location.* <-> general.address.*
+ * - workAuthorization.authorizedInUS <-> demographicsAndLegal.legallyAuthorizedToWork
+ * - workAuthorization.requiresSponsorship <-> demographicsAndLegal.requiresVisaSponsorship
  * @param {object} obj
  * @param {string} path
  * @returns {any}
  */
 export function getPreferenceByPath(obj, path) {
   if (!obj || !path) return undefined;
-  
-  const cleanPath = path.replace(/^preferences\./i, "").trim();
+
+  let cleanPath = path.replace(/^preferences\./i, "").trim();
   if (!cleanPath) return obj;
 
-  // Tokenize dot and bracket notations safely
-  const tokens = [];
-  const regex = /(?:^|\.)([^\.\[\]]+)|\[['"]?([^'"\]]+)['"]?\]/g;
-  let match;
-  while ((match = regex.exec(cleanPath)) !== null) {
-    const prop = match[1] !== undefined ? match[1] : match[2];
-    if (prop) tokens.push(prop);
+  function lookup(currentObj, targetPath) {
+    const tokens = [];
+    const regex = /(?:^|\.)([^\.\[\]]+)|\[['"]?([^'"\]]+)['"]?\]/g;
+    let match;
+    while ((match = regex.exec(targetPath)) !== null) {
+      const prop = match[1] !== undefined ? match[1] : match[2];
+      if (prop) tokens.push(prop);
+    }
+
+    let curr = currentObj;
+    for (const token of tokens) {
+      if (curr === null || curr === undefined) return undefined;
+      if (token === '__proto__' || token === 'constructor' || token === 'prototype') {
+        return undefined;
+      }
+      if (typeof curr !== 'object') return undefined;
+      curr = curr[token];
+    }
+    return curr;
   }
 
-  let current = obj;
-  for (const token of tokens) {
-    if (current === null || current === undefined) return undefined;
-    // Guard against prototype pollution
-    if (token === '__proto__' || token === 'constructor' || token === 'prototype') {
-      return undefined;
-    }
-    if (typeof current !== 'object') return undefined;
-    current = current[token];
+  let result = lookup(obj, cleanPath);
+  if (result !== undefined) return result;
+
+  // Semantic Aliases
+  if (cleanPath.startsWith("general.location.")) {
+    const altPath = cleanPath.replace(/^general\.location\./, "general.address.");
+    result = lookup(obj, altPath);
+    if (result !== undefined) return result;
+  } else if (cleanPath.startsWith("general.address.")) {
+    const altPath = cleanPath.replace(/^general\.address\./, "general.location.");
+    result = lookup(obj, altPath);
+    if (result !== undefined) return result;
+  } else if (cleanPath === "workAuthorization.authorizedInUS" || cleanPath === "demographicsAndLegal.authorizedInUS") {
+    result = lookup(obj, "demographicsAndLegal.legallyAuthorizedToWork") ?? lookup(obj, "workAuthorization.authorizedInUS") ?? lookup(obj, "demographicsAndLegal.authorizedInUS");
+    if (result !== undefined) return result;
+  } else if (cleanPath === "workAuthorization.requiresSponsorship" || cleanPath === "demographicsAndLegal.requiresSponsorship") {
+    result = lookup(obj, "demographicsAndLegal.requiresVisaSponsorship") ?? lookup(obj, "workAuthorization.requiresSponsorship") ?? lookup(obj, "demographicsAndLegal.requiresSponsorship");
+    if (result !== undefined) return result;
+  } else if (cleanPath === "demographicsAndLegal.legallyAuthorizedToWork") {
+    result = lookup(obj, "workAuthorization.authorizedInUS") ?? lookup(obj, "demographicsAndLegal.authorizedInUS");
+    if (result !== undefined) return result;
+  } else if (cleanPath === "demographicsAndLegal.requiresVisaSponsorship") {
+    result = lookup(obj, "workAuthorization.requiresSponsorship") ?? lookup(obj, "demographicsAndLegal.requiresSponsorship");
+    if (result !== undefined) return result;
   }
-  return current;
+
+  return undefined;
 }
 
 /**
  * Resolves template strings using the provided preferences object.
- * When preferences are active, unresolvable tokens resolve to empty string rather than
- * sending raw "${preferences...}" into form fields.
+ * If a variable is unknown or missing from active preferences, raises an explicit
+ * error or returns empty string for documented optional fields.
  * @param {any} input
  * @param {object} preferences
  * @returns {any}
@@ -228,17 +332,36 @@ export function getPreferenceByPath(obj, path) {
 export function resolvePreferenceTemplate(input, preferences) {
   if (!preferences || typeof preferences !== "object") return input;
 
+  function resolveToken(pathKey) {
+    const val = getPreferenceByPath(preferences, pathKey);
+    if (val !== undefined) {
+      return val;
+    }
+    // Allow documented optional fields (e.g. social links, minor) to resolve to empty string
+    if (
+      pathKey.includes('.links.') ||
+      pathKey.endsWith('.minor') ||
+      pathKey.endsWith('.preferredName') ||
+      pathKey.endsWith('.pointers')
+    ) {
+      return "";
+    }
+    // For required/legal fields, throw an explicit error to prevent silent blank submissions
+    throw new Error(`Template variable '\${preferences.${pathKey}}' could not be resolved: property '${pathKey}' is missing or undefined in applicant preferences.`);
+  }
+
   if (typeof input === "string") {
     const singleTokenMatch = input.trim().match(/^\$\{preferences\.([^}]+)\}$/);
     if (singleTokenMatch) {
-      const resolved = getPreferenceByPath(preferences, singleTokenMatch[1]);
+      const resolved = resolveToken(singleTokenMatch[1]);
       if (resolved === undefined || resolved === null) return "";
       if (typeof resolved === "object") return resolved;
+      if (typeof resolved === "boolean" || typeof resolved === "number") return resolved;
       return String(resolved);
     }
 
     return input.replace(/\$\{preferences\.([^}]+)\}/g, (match, pathKey) => {
-      const val = getPreferenceByPath(preferences, pathKey);
+      const val = resolveToken(pathKey);
       if (val === undefined || val === null) {
         return "";
       }

@@ -139,7 +139,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === "TELEMETRY_UPDATE") {
     applyTelemetryState(msg);
-    loadStoredFiles();
   }
 });
 
@@ -635,13 +634,32 @@ function hideTooltip() {
 
 function setupTooltip() {
   document.addEventListener('scroll', hideTooltip, true);
+  document.addEventListener('mouseover', (e) => {
+    const target = e.target.closest('[data-full-date]');
+    if (target) showTooltip({ target });
+  });
+  document.addEventListener('mouseout', (e) => {
+    if (e.target.closest('[data-full-date]')) hideTooltip();
+  });
 }
 
 function openImagePreview(dataUrl) {
-  const win = window.open('', '_blank');
-  if (win) {
-    win.document.write(`<title>AutoResume Visual Capture</title><body style="margin:0;background:#090d16;display:flex;justify-content:center;align-items:center;height:100vh;"><img src="${dataUrl}" style="max-width:95%;max-height:95%;border:1px solid rgba(255,255,255,0.15);box-shadow:0 10px 40px rgba(0,0,0,0.8);" /></body>`);
-  }
+  // window.open is blocked in extension side panels; use chrome.tabs.create instead
+  chrome.tabs.create({ url: 'about:blank' }, (tab) => {
+    if (!tab || !tab.id) return;
+    chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: (src) => {
+        document.title = 'AutoResume Visual Capture';
+        document.body.style.cssText = 'margin:0;background:#090d16;display:flex;justify-content:center;align-items:center;height:100vh;';
+        const img = document.createElement('img');
+        img.src = src;
+        img.style.cssText = 'max-width:95%;max-height:95%;border:1px solid rgba(255,255,255,0.15);box-shadow:0 10px 40px rgba(0,0,0,0.8);';
+        document.body.appendChild(img);
+      },
+      args: [dataUrl]
+    }).catch(() => {});
+  });
 }
 
 // ============================================================================
@@ -708,8 +726,12 @@ async function processUserUploadedFile(file) {
 
           chrome.runtime.sendMessage({ type: "USER_UPLOADED_FILE", payload: filePayload }, () => {
             if (isPref) {
-              chrome.runtime.sendMessage({ type: "USER_SET_PREFERENCES", payload: parsed }, () => {
-                activePreferences = parsed;
+              chrome.runtime.sendMessage({ type: "USER_SET_PREFERENCES", payload: parsed }, (res) => {
+                if (res && !res.success) {
+                  alert(`Preferences validation error: ${res.error}`);
+                } else {
+                  activePreferences = parsed;
+                }
                 resolve();
               });
             } else {
@@ -810,9 +832,10 @@ function renderFilesGrid() {
     const deletePrefBtn = prefCard.querySelector('#deletePreferencesBtn');
     if (deletePrefBtn) {
       deletePrefBtn.addEventListener('click', async () => {
-        if (confirm("Remove applicant preferences profile from storage?")) {
+        if (confirm("Remove applicant preferences profile from storage and MCP server?")) {
           activePreferences = null;
           await chrome.storage.local.set({ preferences: null });
+          chrome.runtime.sendMessage({ type: "CLEAR_PREFERENCES" });
           loadStoredFiles();
         }
       });
@@ -859,8 +882,11 @@ function renderFilesGrid() {
   filesGridContainer.querySelectorAll('.file-delete-btn[data-index]').forEach(btn => {
     btn.addEventListener('click', async (e) => {
       const idx = parseInt(e.target.dataset.index, 10);
-      storedFiles.splice(idx, 1);
+      const deleted = storedFiles.splice(idx, 1)[0];
       await chrome.storage.local.set({ files: storedFiles });
+      if (deleted) {
+        chrome.runtime.sendMessage({ type: "DELETE_FILE", payload: { fileName: deleted.name } });
+      }
       loadStoredFiles();
     });
   });
@@ -883,7 +909,47 @@ function setupQuickActions() {
 
       try {
         const snap = await executeToolInTab("browser_snapshot", { filter: "interactive" });
-        alert(`✓ Page analyzed: ${snap.interactiveCount || 0} interactive elements discovered. Agent is ready to batch autofill.`);
+        const text = snap.compactTree || snap.yaml || "";
+        const lines = text.split('\n');
+        const actions = [];
+        const gen = activePreferences.general || {};
+
+        for (const line of lines) {
+          const match = line.match(/^(@e\d+)\s+([a-zA-Z0-9:_-]+)\s+"([^"]*)"/);
+          if (match) {
+            const ref = match[1];
+            const role = match[2];
+            const label = match[3].toLowerCase();
+
+            if (role.startsWith('textbox')) {
+              if (label.includes('first name') && gen.firstName) {
+                actions.push({ tool: 'form_input', params: { ref, value: gen.firstName } });
+              } else if (label.includes('last name') && gen.lastName) {
+                actions.push({ tool: 'form_input', params: { ref, value: gen.lastName } });
+              } else if ((label.includes('full name') || label === 'name') && (gen.fullName || gen.firstName)) {
+                actions.push({ tool: 'form_input', params: { ref, value: gen.fullName || `${gen.firstName} ${gen.lastName}` } });
+              } else if (label.includes('email') && (gen.email || gen.emailAddress)) {
+                actions.push({ tool: 'form_input', params: { ref, value: gen.email || gen.emailAddress } });
+              } else if ((label.includes('phone') || label.includes('mobile')) && (gen.phone?.digits10 || gen.phone?.formatted)) {
+                actions.push({ tool: 'form_input', params: { ref, value: gen.phone.digits10 || gen.phone.formatted } });
+              } else if (label.includes('city') && (gen.location?.city || gen.address?.city)) {
+                actions.push({ tool: 'form_input', params: { ref, value: gen.location?.city || gen.address?.city } });
+              } else if (label.includes('linkedin') && gen.links?.linkedin) {
+                actions.push({ tool: 'form_input', params: { ref, value: gen.links.linkedin } });
+              } else if (label.includes('github') && gen.links?.github) {
+                actions.push({ tool: 'form_input', params: { ref, value: gen.links.github } });
+              }
+            }
+          }
+        }
+
+        if (actions.length > 0) {
+          startAutofillBtn.textContent = `Filling ${actions.length} fields...`;
+          await executeToolInTab("browser_batch", { actions, stopOnError: false });
+          alert(`✓ AutoResume Autofill: Successfully populated ${actions.length} form fields from your profile.`);
+        } else {
+          alert(`✓ Page analyzed: ${snap.interactiveCount || 0} interactive elements discovered. Connect your external desktop AI (Claude, Cursor, agy) to autofill complex multi-step questionnaires.`);
+        }
       } catch (err) {
         alert(`Autofill inspection error: ${err.message}`);
       } finally {

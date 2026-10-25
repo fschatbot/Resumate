@@ -3,13 +3,17 @@
  *
  * Server-side Accessibility Tree & Contextual Delta State Manager.
  * 1. Tracks element reference tokens (@e1, e1, ref_1), group hierarchy, and active page state.
- * 2. Caches latest Semantic Compact Tree and hierarchical YAML for MCP Resources.
+ * 2. Caches latest Semantic Compact Tree and hierarchical YAML for MCP Resources per tab.
  * 3. Evaluates post-mutation deltas (from extension or server fallback) to return minimal
- *    token diffs on mutating tool executions.
+ *    token diffs on mutating tool executions, capping large dropdown option additions.
  */
 
 export class AXTreeTracker {
   constructor() {
+    // Map of tabId -> TabState
+    this.tabStates = new Map();
+
+    // Default active tab state
     this.latestSnapshot = null;
     this.latestCompactTree = "";
     this.latestYaml = "";
@@ -21,8 +25,6 @@ export class AXTreeTracker {
     this.latestActiveModal = null;
     this.lastUpdated = 0;
     this.latestDelta = null;
-
-    // Server-side fallback node map: "@e1" -> parsed node state
     this.nodeStateMap = new Map();
 
     // Set of tool names that can mutate DOM state
@@ -44,67 +46,98 @@ export class AXTreeTracker {
     ]);
   }
 
-  /**
-   * Checks whether a tool name performs DOM mutation.
-   * @param {string} toolName
-   * @returns {boolean}
-   */
+  _getOrCreateTabState(tabId) {
+    const key = tabId ? String(tabId) : "active";
+    if (!this.tabStates.has(key)) {
+      this.tabStates.set(key, {
+        latestSnapshot: null,
+        latestCompactTree: "",
+        latestYaml: "",
+        latestTitle: "",
+        latestUrl: "",
+        latestInteractiveCount: 0,
+        latestTotalNodes: 0,
+        latestFocusedRef: null,
+        latestActiveModal: null,
+        lastUpdated: 0,
+        latestDelta: null,
+        nodeStateMap: new Map()
+      });
+    }
+    return this.tabStates.get(key);
+  }
+
   isMutatingTool(toolName) {
     return this.mutatingTools.has(toolName);
   }
 
-  /**
-   * Ingests a fresh accessibility snapshot or post-action delta from the browser extension.
-   * @param {object} snapshot
-   * @returns {object|null} delta
-   */
-  updatePageState(snapshot) {
+  updatePageState(snapshot, tabId = null) {
     if (!snapshot) return null;
+
+    const state = this._getOrCreateTabState(tabId);
 
     // If this is a mutating action result that embeds an extension-computed delta
     if (snapshot.delta && !snapshot.compactTree && !snapshot.yaml) {
-      this.latestDelta = snapshot.delta;
-      if (snapshot.focusedRef !== undefined) this.latestFocusedRef = snapshot.focusedRef;
-      if (snapshot.activeModalTitle !== undefined) this.latestActiveModal = snapshot.activeModalTitle;
-      this.lastUpdated = Date.now();
-      return this.latestDelta;
+      state.latestDelta = snapshot.delta;
+      if (snapshot.focusedRef !== undefined) state.latestFocusedRef = snapshot.focusedRef;
+      if (snapshot.activeModalTitle !== undefined) state.latestActiveModal = snapshot.activeModalTitle;
+      state.lastUpdated = Date.now();
+
+      this.latestDelta = state.latestDelta;
+      this.lastUpdated = state.lastUpdated;
+      return state.latestDelta;
     }
 
-    this.latestSnapshot = snapshot;
-    this.latestCompactTree = snapshot.compactTree || snapshot.yaml || "";
-    this.latestYaml = snapshot.hierarchicalYaml || snapshot.yaml || this.latestCompactTree;
-    this.latestTitle = snapshot.title || this.latestTitle || "";
-    this.latestUrl = snapshot.url || this.latestUrl || "";
-    this.latestInteractiveCount = snapshot.interactiveCount ?? this.latestInteractiveCount;
-    this.latestTotalNodes = snapshot.totalNodes ?? this.latestTotalNodes;
-    this.latestFocusedRef = snapshot.focusedRef || null;
-    this.latestActiveModal = snapshot.activeModalTitle || null;
-    this.lastUpdated = Date.now();
+    state.latestSnapshot = snapshot;
+    state.latestCompactTree = snapshot.compactTree || snapshot.yaml || "";
+    state.latestYaml = snapshot.hierarchicalYaml || snapshot.yaml || state.latestCompactTree;
+    state.latestTitle = snapshot.title || state.latestTitle || "";
+    state.latestUrl = snapshot.url || state.latestUrl || "";
+    state.latestInteractiveCount = snapshot.interactiveCount ?? state.latestInteractiveCount;
+    state.latestTotalNodes = snapshot.totalNodes ?? state.latestTotalNodes;
+    state.latestFocusedRef = snapshot.focusedRef || null;
+    state.latestActiveModal = snapshot.activeModalTitle || null;
+    state.lastUpdated = Date.now();
+
+    // Mirror to active default properties
+    this.latestSnapshot = state.latestSnapshot;
+    this.latestCompactTree = state.latestCompactTree;
+    this.latestYaml = state.latestYaml;
+    this.latestTitle = state.latestTitle;
+    this.latestUrl = state.latestUrl;
+    this.latestInteractiveCount = state.latestInteractiveCount;
+    this.latestTotalNodes = state.latestTotalNodes;
+    this.latestFocusedRef = state.latestFocusedRef;
+    this.latestActiveModal = state.latestActiveModal;
+    this.lastUpdated = state.lastUpdated;
 
     // Prefer the rich contextual delta computed directly inside the page AST engine
     if (snapshot.delta) {
-      this.latestDelta = snapshot.delta;
-      this._indexNodesFromCompactTree(this.latestCompactTree);
-      return this.latestDelta;
+      state.latestDelta = snapshot.delta;
+      this.latestDelta = state.latestDelta;
+      this._indexNodesFromCompactTree(state.latestCompactTree, state);
+      return state.latestDelta;
     }
 
     // Fallback: Compute server-side delta by parsing compact tree lines
-    const currentNodes = this._parseCompactTreeToMap(this.latestCompactTree);
-    const delta = this._computeServerDelta(currentNodes, this.nodeStateMap);
+    const currentNodes = this._parseCompactTreeToMap(state.latestCompactTree);
+    const delta = this._computeServerDelta(currentNodes, state.nodeStateMap);
+    state.nodeStateMap = currentNodes;
+    state.latestDelta = delta;
     this.nodeStateMap = currentNodes;
     this.latestDelta = delta;
     return delta;
   }
 
-  /**
-   * Formats a mutating tool execution result with its post-action DOM delta.
-   * @param {string} toolName
-   * @param {any} result
-   * @param {object} [explicitDelta]
-   * @returns {string}
-   */
   formatActionResultWithDelta(toolName, result, explicitDelta = null) {
-    const delta = explicitDelta || (result && result.delta) || null;
+    // Prefer result.delta if explicitDelta has no changes but result.delta has changes
+    let delta = explicitDelta;
+    if ((!delta || !delta.hasChanges) && result && result.delta && result.delta.hasChanges) {
+      delta = result.delta;
+    }
+    if (!delta && result && result.delta) {
+      delta = result.delta;
+    }
 
     let baseMessage = "";
     if (typeof result === "string") {
@@ -133,64 +166,47 @@ export class AXTreeTracker {
     return baseMessage;
   }
 
-  /**
-   * Returns formatted resource content for browser://current-page/interactive-elements.
-   * @returns {string}
-   */
-  getInteractiveElementsResource() {
-    if (this.latestCompactTree) {
-      return this.latestCompactTree;
+  getInteractiveElementsResource(tabId = null) {
+    const state = tabId ? this._getOrCreateTabState(tabId) : this;
+    const header = state.latestTitle
+      ? `[# Page: "${state.latestTitle}" | Interactive: ${state.latestInteractiveCount} | URL: ${state.latestUrl || ""}]\n\n`
+      : "";
+    return header + (state.latestCompactTree || "No interactive elements detected on active page.");
+  }
+
+  getAxTreeResource(tabId = null) {
+    const state = tabId ? this._getOrCreateTabState(tabId) : this;
+    const header = state.latestTitle
+      ? `[# Page: "${state.latestTitle}" | Total Nodes: ${state.latestTotalNodes} | URL: ${state.latestUrl || ""}]\n\n`
+      : "";
+    return header + (state.latestYaml || state.latestCompactTree || "Accessibility tree empty.");
+  }
+
+  reset(tabId = null) {
+    if (tabId) {
+      this.tabStates.delete(String(tabId));
+    } else {
+      this.tabStates.clear();
+      this.latestSnapshot = null;
+      this.latestCompactTree = "";
+      this.latestYaml = "";
+      this.latestTitle = "";
+      this.latestUrl = "";
+      this.latestInteractiveCount = 0;
+      this.latestTotalNodes = 0;
+      this.latestFocusedRef = null;
+      this.latestActiveModal = null;
+      this.lastUpdated = 0;
+      this.latestDelta = null;
+      this.nodeStateMap.clear();
     }
-    const header = this.latestTitle
-      ? `[# Page: "${this.latestTitle}" | Interactive: ${this.latestInteractiveCount} | URL: ${this.latestUrl || ""}]\n`
-      : "";
-    return header + "No interactive elements detected on active page.";
   }
 
-  /**
-   * Returns formatted resource content for browser://current-page/ax-tree.
-   * @returns {string}
-   */
-  getAxTreeResource() {
-    const header = this.latestTitle
-      ? `[# Page: "${this.latestTitle}" | Total Nodes: ${this.latestTotalNodes} | URL: ${this.latestUrl || ""}]\n\n`
-      : "";
-    return header + (this.latestYaml || this.latestCompactTree || "Accessibility tree empty.");
-  }
-
-  /**
-   * Resets cached state.
-   */
-  reset() {
-    this.latestSnapshot = null;
-    this.latestCompactTree = "";
-    this.latestYaml = "";
-    this.latestTitle = "";
-    this.latestUrl = "";
-    this.latestInteractiveCount = 0;
-    this.latestTotalNodes = 0;
-    this.latestFocusedRef = null;
-    this.latestActiveModal = null;
-    this.lastUpdated = 0;
-    this.latestDelta = null;
-    this.nodeStateMap.clear();
-  }
-
-  // ============================================================================
-  // Internal Parsing & Fallback Diffing Helpers
-  // ============================================================================
-
-  _indexNodesFromCompactTree(treeText) {
+  _indexNodesFromCompactTree(treeText, state = this) {
     if (!treeText) return;
-    this.nodeStateMap = this._parseCompactTreeToMap(treeText);
+    state.nodeStateMap = this._parseCompactTreeToMap(treeText);
   }
 
-  /**
-   * Parses both the new Semantic Compact Tree format:
-   *   `@e14 combobox "Shipping Method" = "Express" [expanded, required]`
-   * and legacy format:
-   *   `@e14 -> combobox "Shipping Method": "Express" [expanded, required]`
-   */
   _parseCompactTreeToMap(treeText) {
     const map = new Map();
     if (!treeText || typeof treeText !== "string") return map;

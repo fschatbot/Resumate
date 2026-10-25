@@ -57,7 +57,8 @@ async function saveSessionState() {
     await chrome.storage.session.set({
       mcpGroupId,
       activeMcpTabId,
-      sessionStats
+      sessionStats,
+      toolExecutionHistory: toolExecutionHistory.slice(0, 50)
     }).catch(() => {});
   }
 }
@@ -65,10 +66,14 @@ async function saveSessionState() {
 async function restoreSessionState() {
   if (chrome.storage.session) {
     try {
-      const state = await chrome.storage.session.get(["mcpGroupId", "activeMcpTabId", "sessionStats"]);
+      const state = await chrome.storage.session.get(["mcpGroupId", "activeMcpTabId", "sessionStats", "toolExecutionHistory"]);
       if (state.mcpGroupId) mcpGroupId = state.mcpGroupId;
       if (state.activeMcpTabId) activeMcpTabId = state.activeMcpTabId;
       if (state.sessionStats) Object.assign(sessionStats, state.sessionStats);
+      if (Array.isArray(state.toolExecutionHistory)) {
+        toolExecutionHistory.length = 0;
+        toolExecutionHistory.push(...state.toolExecutionHistory);
+      }
     } catch (e) {}
   }
 
@@ -282,6 +287,9 @@ export async function attachDebugger(tabId) {
   try {
     await chrome.debugger.attach({ tabId }, "1.3");
     attachedDebuggers.add(tabId);
+    // Enable Runtime and Network event domains for console/network monitoring
+    chrome.debugger.sendCommand({ tabId }, "Runtime.enable", {}).catch(() => {});
+    chrome.debugger.sendCommand({ tabId }, "Network.enable", {}).catch(() => {});
     return true;
   } catch (e) {
     if (e.message && e.message.includes("Already attached")) {
@@ -318,6 +326,57 @@ if (chrome.debugger && chrome.debugger.onDetach) {
   });
 }
 
+// Populate console log and network request monitors via CDP events
+if (chrome.debugger && chrome.debugger.onEvent) {
+  chrome.debugger.onEvent.addListener((source, method, params) => {
+    if (!source || !source.tabId) return;
+    if (source.tabId !== activeMcpTabId) return;
+
+    if (method === 'Runtime.consoleAPICalled') {
+      const args = (params.args || []).map(a => a.value !== undefined ? String(a.value) : (a.description || '')).join(' ');
+      monitoredConsoleLogs.push({
+        level: params.type || 'log',
+        text: args,
+        timestamp: params.timestamp ? new Date(params.timestamp * 1000).toISOString() : new Date().toISOString()
+      });
+      if (monitoredConsoleLogs.length > 200) monitoredConsoleLogs.shift();
+    }
+
+    if (method === 'Runtime.exceptionThrown') {
+      const ex = params.exceptionDetails;
+      monitoredConsoleLogs.push({
+        level: 'error',
+        text: ex.text || (ex.exception && ex.exception.description) || 'Unhandled exception',
+        timestamp: new Date().toISOString()
+      });
+      if (monitoredConsoleLogs.length > 200) monitoredConsoleLogs.shift();
+    }
+
+    if (method === 'Network.responseReceived') {
+      monitoredNetworkRequests.push({
+        requestId: params.requestId,
+        url: params.response?.url || '',
+        status: params.response?.status,
+        mimeType: params.response?.mimeType || '',
+        timestamp: new Date().toISOString()
+      });
+      if (monitoredNetworkRequests.length > 200) monitoredNetworkRequests.shift();
+    }
+
+    if (method === 'Network.loadingFailed') {
+      monitoredNetworkRequests.push({
+        requestId: params.requestId,
+        url: params.url || '',
+        status: 0,
+        failed: true,
+        errorText: params.errorText || 'Network request failed',
+        timestamp: new Date().toISOString()
+      });
+      if (monitoredNetworkRequests.length > 200) monitoredNetworkRequests.shift();
+    }
+  });
+}
+
 async function sendCdpCommand(tabId, method, params = {}) {
   const attached = await attachDebugger(tabId);
   if (!attached) throw new Error(`DevTools Protocol debugger not attached to tab #${tabId}`);
@@ -335,7 +394,7 @@ async function sendCdpCommand(tabId, method, params = {}) {
 
 /**
  * Resolves viewport center coordinates for an element reference, rescuing visually-hidden
- * inputs by targeting their visible associated label or wrapper.
+ * inputs by targeting their visible associated label or wrapper, and verifies it is not occluded.
  */
 async function getElementCenterCoordinates(tabId, elementRef, shouldScroll = true) {
   const res = await chrome.scripting.executeScript({
@@ -369,23 +428,50 @@ async function getElementCenterCoordinates(tabId, elementRef, shouldScroll = tru
       rect = targetEl.getBoundingClientRect();
       const cx = Math.round(rect.left + rect.width / 2);
       const cy = Math.round(rect.top + rect.height / 2);
-      return { x: cx, y: cy, tagName: el.tagName };
+
+      // Occlusion verification
+      const hit = document.elementFromPoint(cx, cy);
+      let isOccluded = false;
+      let occluderDesc = '';
+      if (hit && hit !== targetEl && !targetEl.contains(hit) && !hit.contains(targetEl)) {
+        const hasAssociated = (el.labels && Array.from(el.labels).some(l => l.contains(hit))) ||
+                              (targetEl.closest('label') && targetEl.closest('label').contains(hit));
+        if (!hasAssociated) {
+          isOccluded = true;
+          occluderDesc = hit.tagName.toLowerCase() + (hit.className ? `.${String(hit.className).trim().split(/\s+/).join('.')}` : '') + (hit.id ? `#${hit.id}` : '');
+        }
+      }
+
+      return { x: cx, y: cy, tagName: el.tagName, isOccluded, occluderDesc };
     },
     args: [elementRef, shouldScroll !== false]
   });
-  return res[0]?.result;
+
+  const coords = res[0]?.result;
+  if (coords && coords.isOccluded) {
+    throw new Error(`Element '${elementRef}' at [${coords.x}, ${coords.y}] is occluded by <${coords.occluderDesc}> (such as a modal backdrop, cookie banner, or sticky overlay). Please dismiss overlays before clicking.`);
+  }
+  return coords;
 }
 
 async function cdpClick(tabId, x, y, button = 'left', clickCount = 1) {
   const attached = await attachDebugger(tabId);
 
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    func: (cx, cy) => {
-      if (window.__showActionIndicator) window.__showActionIndicator(cx, cy, 'click', 350);
-    },
-    args: [x, y]
-  }).catch(() => {});
+  let showOverlay = true;
+  try {
+    const bs = await chrome.storage.local.get(["behaviorSettings"]);
+    if (bs.behaviorSettings && bs.behaviorSettings.visualOverlay === false) showOverlay = false;
+  } catch (e) {}
+
+  if (showOverlay) {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (cx, cy) => {
+        if (window.__showActionIndicator) window.__showActionIndicator(cx, cy, 'click', 350);
+      },
+      args: [x, y]
+    }).catch(() => {});
+  }
 
   if (!attached) {
     return chrome.scripting.executeScript({
@@ -409,25 +495,27 @@ async function cdpClick(tabId, x, y, button = 'left', clickCount = 1) {
   const buttons = button === 'right' ? 2 : (button === 'middle' ? 4 : 1);
 
   for (let count = 1; count <= clickCount; count++) {
-    await sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
-      type: "mousePressed",
-      x,
-      y,
-      button: cdpButton,
-      clickCount: count,
-      buttons
-    });
+    try {
+      await sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        x,
+        y,
+        button: cdpButton,
+        clickCount: count,
+        buttons
+      });
 
-    await new Promise(r => setTimeout(r, 100));
-
-    await sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
-      type: "mouseReleased",
-      x,
-      y,
-      button: cdpButton,
-      clickCount: count,
-      buttons: 0
-    });
+      await new Promise(r => setTimeout(r, 60));
+    } finally {
+      await sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        x,
+        y,
+        button: cdpButton,
+        clickCount: count,
+        buttons: 0
+      }).catch(() => {});
+    }
 
     if (count < clickCount) {
       await new Promise(r => setTimeout(r, 60));
@@ -441,13 +529,21 @@ async function cdpHover(tabId, x, y, hoverMs = 150) {
   const duration = Math.max(100, hoverMs);
   const attached = await attachDebugger(tabId);
 
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    func: (cx, cy, d) => {
-      if (window.__showActionIndicator) window.__showActionIndicator(cx, cy, 'hover', d + 50);
-    },
-    args: [x, y]
-  }).catch(() => {});
+  let showOverlay = true;
+  try {
+    const bs = await chrome.storage.local.get(["behaviorSettings"]);
+    if (bs.behaviorSettings && bs.behaviorSettings.visualOverlay === false) showOverlay = false;
+  } catch (e) {}
+
+  if (showOverlay) {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (cx, cy, d) => {
+        if (window.__showActionIndicator) window.__showActionIndicator(cx, cy, 'hover', d + 50);
+      },
+      args: [x, y, duration]
+    }).catch(() => {});
+  }
 
   if (!attached) {
     return chrome.scripting.executeScript({
@@ -480,38 +576,141 @@ async function cdpDrag(tabId, sx, sy, ex, ey) {
   await sendCdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: sx, y: sy });
   await new Promise(r => setTimeout(r, 60));
 
-  await sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
-    type: "mousePressed",
-    x: sx,
-    y: sy,
-    button: "left",
-    clickCount: 1,
-    buttons: 1
-  });
-  await new Promise(r => setTimeout(r, 80));
-
-  const steps = 8;
-  for (let i = 1; i <= steps; i++) {
-    const curX = Math.round(sx + (ex - sx) * (i / steps));
-    const curY = Math.round(sy + (ey - sy) * (i / steps));
+  try {
     await sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
-      type: "mouseMoved",
-      x: curX,
-      y: curY,
+      type: "mousePressed",
+      x: sx,
+      y: sy,
+      button: "left",
+      clickCount: 1,
       buttons: 1
     });
-    await new Promise(r => setTimeout(r, 25));
+    await new Promise(r => setTimeout(r, 80));
+
+    const steps = 8;
+    for (let i = 1; i <= steps; i++) {
+      const curX = Math.round(sx + (ex - sx) * (i / steps));
+      const curY = Math.round(sy + (ey - sy) * (i / steps));
+      await sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x: curX,
+        y: curY,
+        buttons: 1
+      });
+      await new Promise(r => setTimeout(r, 25));
+    }
+  } finally {
+    await sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x: ex,
+      y: ey,
+      button: "left",
+      clickCount: 1,
+      buttons: 0
+    }).catch(() => {});
   }
 
-  await sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
-    type: "mouseReleased",
-    x: ex,
-    y: ey,
-    button: "left",
-    clickCount: 1,
-    buttons: 0
-  });
+  return true;
+}
 
+const CDP_KEY_MAP = {
+  Enter: { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r", unmodifiedText: "\r" },
+  Tab: { key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 },
+  Escape: { key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 },
+  Backspace: { key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 },
+  Delete: { key: "Delete", code: "Delete", windowsVirtualKeyCode: 46 },
+  ArrowDown: { key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 },
+  ArrowUp: { key: "ArrowUp", code: "ArrowUp", windowsVirtualKeyCode: 38 },
+  ArrowLeft: { key: "ArrowLeft", code: "ArrowLeft", windowsVirtualKeyCode: 37 },
+  ArrowRight: { key: "ArrowRight", code: "ArrowRight", windowsVirtualKeyCode: 39 },
+  Home: { key: "Home", code: "Home", windowsVirtualKeyCode: 36 },
+  End: { key: "End", code: "End", windowsVirtualKeyCode: 35 },
+  PageUp: { key: "PageUp", code: "PageUp", windowsVirtualKeyCode: 33 },
+  PageDown: { key: "PageDown", code: "PageDown", windowsVirtualKeyCode: 34 },
+  " ": { key: " ", code: "Space", windowsVirtualKeyCode: 32, text: " ", unmodifiedText: " " }
+};
+
+async function cdpPressKey(tabId, keyName, modifiersList = []) {
+  const attached = await attachDebugger(tabId);
+  let modifiers = 0;
+  if (modifiersList.includes("Alt")) modifiers |= 1;
+  if (modifiersList.includes("Control") || modifiersList.includes("Ctrl")) modifiers |= 2;
+  if (modifiersList.includes("Meta") || modifiersList.includes("Command")) modifiers |= 4;
+  if (modifiersList.includes("Shift")) modifiers |= 8;
+
+  const keyConfig = CDP_KEY_MAP[keyName] || {
+    key: keyName,
+    code: keyName.length === 1 ? `Key${keyName.toUpperCase()}` : keyName,
+    windowsVirtualKeyCode: keyName.length === 1 ? keyName.toUpperCase().charCodeAt(0) : 0,
+    text: keyName.length === 1 ? keyName : undefined,
+    unmodifiedText: keyName.length === 1 ? keyName : undefined
+  };
+
+  if (attached) {
+    await sendCdpCommand(tabId, "Input.dispatchKeyEvent", {
+      type: keyConfig.text ? "keyDown" : "rawKeyDown",
+      modifiers,
+      windowsVirtualKeyCode: keyConfig.windowsVirtualKeyCode,
+      code: keyConfig.code,
+      key: keyConfig.key,
+      text: keyConfig.text,
+      unmodifiedText: keyConfig.unmodifiedText
+    });
+
+    if (keyName === "Enter") {
+      await sendCdpCommand(tabId, "Input.dispatchKeyEvent", {
+        type: "char",
+        modifiers,
+        text: "\r",
+        unmodifiedText: "\r"
+      }).catch(() => {});
+    }
+
+    await new Promise(r => setTimeout(r, 40));
+
+    await sendCdpCommand(tabId, "Input.dispatchKeyEvent", {
+      type: "keyUp",
+      modifiers,
+      windowsVirtualKeyCode: keyConfig.windowsVirtualKeyCode,
+      code: keyConfig.code,
+      key: keyConfig.key
+    });
+    return true;
+  }
+
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (key, cfg, mods) => {
+      const active = document.activeElement || document.body;
+      const opts = {
+        key: cfg.key,
+        code: cfg.code,
+        bubbles: true,
+        cancelable: true,
+        altKey: mods.includes("Alt"),
+        ctrlKey: mods.includes("Control") || mods.includes("Ctrl"),
+        metaKey: mods.includes("Meta"),
+        shiftKey: mods.includes("Shift")
+      };
+      active.dispatchEvent(new KeyboardEvent("keydown", opts));
+      if (key === "Enter") {
+        if (active.tagName === "BUTTON" || (active.tagName === "INPUT" && active.type === "submit")) {
+          active.click();
+        } else if (active.form) {
+          active.form.requestSubmit ? active.form.requestSubmit() : active.form.submit();
+        }
+      } else if (key === "Tab") {
+        const focusable = Array.from(document.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'));
+        const idx = focusable.indexOf(active);
+        if (idx !== -1) {
+          const nextIdx = mods.includes("Shift") ? (idx - 1 + focusable.length) % focusable.length : (idx + 1) % focusable.length;
+          focusable[nextIdx]?.focus();
+        }
+      }
+      active.dispatchEvent(new KeyboardEvent("keyup", opts));
+    },
+    args: [keyName, keyConfig, modifiersList]
+  });
   return true;
 }
 
@@ -881,16 +1080,17 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
       const depth = params.depth || 30;
       const maxChars = params.maxChars || 50000;
       const rootRefId = params.rootRefId || null;
+      const updateBaseline = params.updateBaseline !== false && !rootRefId && !params.deltaOnly && filter !== "delta";
 
       const res = await chrome.scripting.executeScript({
         target: { tabId: targetTabId },
-        func: (f, d, mc, rr, fmt) => {
+        func: (f, d, mc, rr, fmt, ub) => {
           if (typeof window.__generateAccessibilityTree === "function") {
-            return window.__generateAccessibilityTree(f, d, mc, rr, fmt);
+            return window.__generateAccessibilityTree(f, d, mc, rr, fmt, ub);
           }
           return { yaml: "Accessibility tree script initializing... Please re-run.", url: window.location.href };
         },
-        args: [filter, depth, maxChars, rootRefId, format]
+        args: [filter, depth, maxChars, rootRefId, format, updateBaseline]
       });
 
       const snap = res[0]?.result || { yaml: "Empty tree." };
@@ -908,9 +1108,9 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
       const res = await chrome.scripting.executeScript({
         target: { tabId: targetTabId },
         func: (query) => {
-          // Ensure tree has indexed current interactive controls first
+          // Ensure tree has indexed current interactive controls without resetting baseline
           if (typeof window.__generateAccessibilityTree === "function") {
-            window.__generateAccessibilityTree("interactive", 30, 50000, null, "compact");
+            window.__generateAccessibilityTree("interactive", 30, 50000, null, "compact", false);
           }
 
           if (typeof window.__getElementByRef === "function") {
@@ -965,7 +1165,16 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
       const res = await chrome.scripting.executeScript({
         target: { tabId: targetTabId },
         func: (maxLen) => {
-          const container = document.querySelector('main, article, [role="main"], form') || document.body;
+          let container = document.querySelector('main, [role="main"], article');
+          if (!container) {
+            const forms = Array.from(document.querySelectorAll('form'));
+            if (forms.length > 0) {
+              forms.sort((a, b) => (b.innerText || '').length - (a.innerText || '').length);
+              container = (forms[0].innerText || '').length > 200 ? forms[0] : document.body;
+            } else {
+              container = document.body;
+            }
+          }
           const text = container ? (container.innerText || container.textContent || '') : '';
           return text.length > maxLen ? text.slice(0, maxLen) + '...' : text;
         },
@@ -981,15 +1190,55 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
       await chrome.scripting.executeScript({
         target: { tabId: targetTabId },
         func: () => { if (window.__hideActionIndicator) window.__hideActionIndicator(); }
-      });
+      }).catch(() => {});
 
-      const tab = await chrome.tabs.get(targetTabId);
-      const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-      const base64 = dataUrl.replace(/^data:image\/png;base64,/, "");
+      const attached = await attachDebugger(targetTabId);
+      let base64 = "";
+      let metadata = {};
+
+      if (attached) {
+        try {
+          const layoutMetrics = await sendCdpCommand(targetTabId, "Page.getLayoutMetrics", {});
+          const viewport = layoutMetrics.cssLayoutViewport || layoutMetrics.layoutViewport || { clientWidth: 1280, clientHeight: 800 };
+          const contentWidth = layoutMetrics.contentSize?.width || viewport.clientWidth;
+          const contentHeight = layoutMetrics.contentSize?.height || viewport.clientHeight;
+
+          metadata = {
+            viewport: { width: viewport.clientWidth, height: viewport.clientHeight },
+            contentSize: { width: contentWidth, height: contentHeight },
+            fullPage: Boolean(params.fullPage)
+          };
+
+          const screenshotParams = { format: "png" };
+          if (params.fullPage) {
+            screenshotParams.captureBeyondViewport = true;
+            screenshotParams.clip = {
+              x: 0,
+              y: 0,
+              width: contentWidth,
+              height: contentHeight,
+              scale: 1
+            };
+          }
+
+          const cdpSnap = await sendCdpCommand(targetTabId, "Page.captureScreenshot", screenshotParams);
+          if (cdpSnap && cdpSnap.data) {
+            base64 = cdpSnap.data;
+          }
+        } catch (e) {}
+      }
+
+      if (!base64) {
+        const tab = await chrome.tabs.get(targetTabId);
+        const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+        base64 = dataUrl.replace(/^data:image\/png;base64,/, "");
+        metadata = { fullPage: false };
+      }
 
       return {
         screenshotBase64: base64,
-        message: "Visible viewport captured.",
+        metadata,
+        message: params.fullPage ? "Full-page screenshot captured." : "Visible viewport captured.",
         timestamp: new Date().toISOString()
       };
     }
@@ -1057,7 +1306,7 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
 
     case "browser_hover": {
       const shouldScroll = params.scroll !== false;
-      let hoverMs = 200;
+      let hoverMs = 150;
       if (params.duration !== undefined) hoverMs = Number(params.duration);
       else if (params.time !== undefined) hoverMs = Number(params.time) * (Number(params.time) < 10 ? 1000 : 1);
       else if (params.seconds !== undefined) hoverMs = Number(params.seconds) * 1000;
@@ -1112,7 +1361,15 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
     }
 
     case "browser_type": {
-      const { element, text, clearValue = true, delay = 25 } = params;
+      const { element, text, clearValue = true } = params;
+      let delay = params.delay !== undefined ? params.delay : 25;
+      try {
+        const bsData = await chrome.storage.local.get(["behaviorSettings"]);
+        if (bsData.behaviorSettings && bsData.behaviorSettings.humanTyping === false) {
+          delay = 0;
+        }
+      } catch (e) {}
+
       await chrome.scripting.executeScript({
         target: { tabId: targetTabId },
         func: async (elRef, txt, clr, dly) => {
@@ -1128,21 +1385,7 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
     }
 
     case "browser_press_key": {
-      await chrome.scripting.executeScript({
-        target: { tabId: targetTabId },
-        func: (keyName, modifiers) => {
-          const active = document.activeElement || document.body;
-          const altKey = modifiers?.includes("Alt") || false;
-          const ctrlKey = modifiers?.includes("Control") || false;
-          const metaKey = modifiers?.includes("Meta") || false;
-          const shiftKey = modifiers?.includes("Shift") || false;
-
-          const opts = { key: keyName, code: keyName, bubbles: true, cancelable: true, altKey, ctrlKey, metaKey, shiftKey };
-          active.dispatchEvent(new KeyboardEvent("keydown", opts));
-          active.dispatchEvent(new KeyboardEvent("keyup", opts));
-        },
-        args: [params.key, params.modifiers || []]
-      });
+      await cdpPressKey(targetTabId, params.key, params.modifiers || []);
       toolResult = { success: true, message: `Pressed key '${params.key}'.` };
       break;
     }
@@ -1247,22 +1490,48 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
     }
 
     case "browser_get_console_logs": {
+      let logs = [...monitoredConsoleLogs];
+      if (params.onlyErrors) {
+        logs = logs.filter(l => l.level === 'error');
+      }
+      const limit = typeof params.limit === 'number' && params.limit > 0 ? params.limit : 50;
       return {
         success: true,
-        logs: monitoredConsoleLogs.slice(-50)
+        logs: logs.slice(-limit)
       };
     }
 
     case "browser_get_network_requests": {
+      let requests = [...monitoredNetworkRequests];
+      if (params.onlyErrors) {
+        requests = requests.filter(r => (typeof r.status === 'number' && r.status >= 400) || r.failed);
+      }
+      if (params.urlPattern) {
+        try {
+          const regex = new RegExp(params.urlPattern, 'i');
+          requests = requests.filter(r => regex.test(r.url));
+        } catch (e) {
+          requests = requests.filter(r => r.url.toLowerCase().includes(String(params.urlPattern).toLowerCase()));
+        }
+      }
+      const limit = typeof params.limit === 'number' && params.limit > 0 ? params.limit : 50;
       return {
         success: true,
-        requests: monitoredNetworkRequests.slice(-50)
+        requests: requests.slice(-limit)
       };
     }
 
     case "browser_batch": {
       const actions = params.actions || [];
-      const stopOnError = params.stopOnError !== false;
+      // Respect stored failFast behavior setting (default: true)
+      let defaultStopOnError = true;
+      try {
+        const bsData = await chrome.storage.local.get(["behaviorSettings"]);
+        if (bsData.behaviorSettings && bsData.behaviorSettings.failFast === false) {
+          defaultStopOnError = false;
+        }
+      } catch (e) {}
+      const stopOnError = params.stopOnError !== undefined ? params.stopOnError !== false : defaultStopOnError;
       const stepReports = [];
 
       const currentLogItem = toolExecutionHistory.find(h => h.tool === "browser_batch" && h.status === "running");
@@ -1369,13 +1638,17 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
 
     case "tabs_context": {
       const tabs = await chrome.tabs.query({ currentWindow: true });
-      return tabs.map(t => ({
-        id: t.id,
-        title: t.title,
-        url: t.url,
-        groupId: t.groupId,
-        active: t.active
-      }));
+      return tabs.map(t => {
+        const isMcpTab = mcpGroupId !== null && t.groupId === mcpGroupId;
+        return {
+          id: t.id,
+          title: isMcpTab ? t.title : "[Personal / Unconfined Tab]",
+          url: isMcpTab ? t.url : "about:blank",
+          isMcpTab,
+          groupId: t.groupId,
+          active: t.active
+        };
+      });
     }
 
     case "tabs_context_mcp": {
@@ -1414,10 +1687,18 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
     }
 
     case "tabs_create": {
-      const newTab = await chrome.tabs.create({ url: params.url || "about:blank" });
+      let targetUrl = params.url || "chrome://newtab";
+      if (params.url) {
+        const trimmed = params.url.trim().toLowerCase();
+        if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://") && trimmed !== "about:blank" && trimmed !== "chrome://newtab") {
+          throw new Error("Only http:// and https:// URLs are supported for tab creation.");
+        }
+        targetUrl = params.url.trim();
+      }
+      const newTab = await chrome.tabs.create({ url: targetUrl });
       await isolateTabIntoMcpGroup(newTab.id);
       await saveSessionState();
-      return { tabId: newTab.id, url: newTab.url || params.url };
+      return { tabId: newTab.id, url: newTab.url || targetUrl };
     }
 
     case "tabs_close": {
@@ -1482,26 +1763,37 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
   return toolResult;
 }
 
-async function waitForTabComplete(tabId) {
-  try {
-    const tab = await chrome.tabs.get(tabId);
-    if (tab.status === "complete") return;
-  } catch (e) {}
+async function waitForTabComplete(tabId, timeoutMs = 15000) {
+  // Give Chrome a short moment to transition into loading state to avoid premature returns
+  await new Promise(r => setTimeout(r, 150));
 
   return new Promise((resolve) => {
+    let resolved = false;
     let timer = null;
+
+    function finish() {
+      if (resolved) return;
+      resolved = true;
+      chrome.tabs.onUpdated.removeListener(listener);
+      if (timer) clearTimeout(timer);
+      resolve();
+    }
+
     function listener(id, info) {
       if (id === tabId && info.status === "complete") {
-        chrome.tabs.onUpdated.removeListener(listener);
-        if (timer) clearTimeout(timer);
-        resolve();
+        finish();
       }
     }
+
     chrome.tabs.onUpdated.addListener(listener);
-    timer = setTimeout(() => {
-      chrome.tabs.onUpdated.removeListener(listener);
-      resolve();
-    }, 10000);
+
+    chrome.tabs.get(tabId).then(tab => {
+      if (tab && tab.status === "complete") {
+        setTimeout(finish, 200);
+      }
+    }).catch(() => finish());
+
+    timer = setTimeout(finish, timeoutMs);
   });
 }
 
@@ -1509,17 +1801,40 @@ async function waitForTabComplete(tabId) {
 // Telemetry & Tool History Storage
 // ============================================================================
 
+function sanitizeForHistory(item) {
+  if (!item || typeof item !== "object") return item;
+  const sanitized = { ...item };
+  if (sanitized.result && typeof sanitized.result === "object") {
+    const resCopy = { ...sanitized.result };
+    if (resCopy.screenshotBase64) {
+      resCopy.screenshotBase64 = `[Base64 PNG Image: ${(resCopy.screenshotBase64.length / 1024).toFixed(1)} KB]`;
+    }
+    if (typeof resCopy.compactTree === "string" && resCopy.compactTree.length > 500) {
+      resCopy.compactTree = resCopy.compactTree.slice(0, 500) + `... [${resCopy.compactTree.length} chars truncated]`;
+    }
+    if (typeof resCopy.yaml === "string" && resCopy.yaml.length > 500) {
+      resCopy.yaml = resCopy.yaml.slice(0, 500) + `... [${resCopy.yaml.length} chars truncated]`;
+    }
+    sanitized.result = resCopy;
+  }
+  return sanitized;
+}
+
 function recordToolExecution(item) {
-  toolExecutionHistory.unshift(item);
-  if (toolExecutionHistory.length > 100) toolExecutionHistory.pop();
+  const clean = sanitizeForHistory(item);
+  toolExecutionHistory.unshift(clean);
+  if (toolExecutionHistory.length > 50) toolExecutionHistory.pop();
+  saveSessionState();
   broadcastTelemetry();
 }
 
 function updateToolExecution(item) {
-  const idx = toolExecutionHistory.findIndex(x => x.id === item.id);
+  const clean = sanitizeForHistory(item);
+  const idx = toolExecutionHistory.findIndex(x => x.id === clean.id);
   if (idx !== -1) {
-    toolExecutionHistory[idx] = item;
+    toolExecutionHistory[idx] = clean;
   }
+  saveSessionState();
   broadcastTelemetry();
 }
 
@@ -1585,7 +1900,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (!isConnectedToBridge) {
         connectWebSocketBridge();
       }
-      await verifyTabConfinement(null);
+      if (mcpGroupId === null) {
+        try {
+          const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+          const target = tabs.find(t => t.url && !t.url.startsWith("chrome-extension://") && !t.url.startsWith("chrome://"));
+          if (target && target.id) {
+            await isolateTabIntoMcpGroup(target.id);
+            await saveSessionState();
+          }
+        } catch (e) {}
+      } else {
+        await verifyTabConfinement(null);
+      }
       sendResponse({
         stats: sessionStats,
         connected: isConnectedToBridge,
@@ -1665,6 +1991,35 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }));
       }
       sendResponse({ success: true });
+    });
+    return true;
+  }
+
+  if (msg.type === "CLEAR_PREFERENCES" || msg.type === "USER_CLEAR_PREFERENCES") {
+    chrome.storage.local.set({ preferences: null }, () => {
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+          type: "preferences_cleared"
+        }));
+      }
+      sendResponse({ success: true });
+    });
+    return true;
+  }
+
+  if (msg.type === "DELETE_FILE" || msg.type === "USER_DELETE_FILE") {
+    const fileName = msg.payload?.fileName || msg.payload?.name;
+    chrome.storage.local.get(["files"], (data) => {
+      const files = (data.files || []).filter(f => f.name.toLowerCase() !== String(fileName || '').toLowerCase());
+      chrome.storage.local.set({ files }, () => {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({
+            type: "file_deleted",
+            payload: { fileName }
+          }));
+        }
+        sendResponse({ success: true, remainingFiles: files.length });
+      });
     });
     return true;
   }

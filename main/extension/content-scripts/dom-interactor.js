@@ -2,8 +2,8 @@
  * content-scripts/dom-interactor.js
  *
  * Implements synthetic DOM event dispatching, human-like typing simulation,
- * React/framework controlled input mutation, file upload synthesis,
- * and live visual feedback overlays.
+ * React/Vue framework controlled input mutation, file upload synthesis,
+ * dropzone-to-input resolution, and live visual feedback overlays.
  */
 
 (() => {
@@ -55,19 +55,16 @@
     el.style.opacity = '1';
 
     if (actionType === 'hover') {
-      // Vivid Emerald / Cyan pulse for hover
       el.style.border = '3px solid #10b981';
       el.style.background = 'radial-gradient(circle, rgba(16, 185, 129, 0.45) 0%, rgba(6, 182, 212, 0.2) 65%, transparent 100%)';
       el.style.boxShadow = '0 0 16px #10b981, 0 0 32px rgba(16, 185, 129, 0.5), inset 0 0 10px rgba(16, 185, 129, 0.4)';
       el.innerHTML = '<div style="width: 10px; height: 10px; border-radius: 50%; background: #ffffff; box-shadow: 0 0 8px #10b981;"></div>';
     } else if (actionType === 'type') {
-      // Emerald / Blue for typing
       el.style.border = '2.5px solid #06b6d4';
       el.style.background = 'rgba(6, 182, 212, 0.25)';
       el.style.boxShadow = '0 0 14px rgba(6, 182, 212, 0.6)';
       el.innerHTML = '<div style="width: 8px; height: 8px; border-radius: 50%; background: #ffffff; box-shadow: 0 0 6px #06b6d4;"></div>';
     } else {
-      // High-contrast Cyan ripple for click
       el.style.border = '3px solid #06b6d4';
       el.style.background = 'radial-gradient(circle, rgba(6, 182, 212, 0.55) 0%, rgba(6, 182, 212, 0.2) 60%, transparent 100%)';
       el.style.boxShadow = '0 0 18px #06b6d4, 0 0 36px rgba(6, 182, 212, 0.6), inset 0 0 10px #06b6d4';
@@ -151,10 +148,10 @@
 
   /**
    * Dispatches realistic synthetic mouse click events and native action.
-   * Smoothly scrolls target into view, highlights position, and triggers click.
    * @param {Element} target
    * @param {string} [button="left"]
    * @param {number} [clickCount=1]
+   * @param {boolean} [doScroll=true]
    * @returns {Promise<boolean>}
    */
   window.__dispatchClick = async function(target, button = 'left', clickCount = 1, doScroll = true) {
@@ -199,7 +196,6 @@
       target.focus();
     }
 
-    // 10 CPS click duration: 100ms hold between down and up
     await new Promise(r => setTimeout(r, 100));
 
     target.dispatchEvent(new PointerEvent('pointerup', mouseOpts));
@@ -208,8 +204,6 @@
     const tag = target.tagName.toUpperCase();
     const isInteractiveTag = ['BUTTON', 'A', 'INPUT', 'SELECT'].includes(tag) || target.hasAttribute('role');
 
-    // Trigger click: use native .click() for form inputs/buttons to invoke browser default action
-    // and click handlers without double-invoking
     if (button === 'left' && isInteractiveTag && typeof target.click === 'function') {
       try {
         target.click();
@@ -230,7 +224,7 @@
   /**
    * Dispatches hover events with smooth scrolling and maintained hover duration.
    * @param {Element} target
-   * @param {number} [hoverDuration=150] - Milliseconds to maintain hover (at least 100ms)
+   * @param {number} [hoverDuration=150]
    * @returns {Promise<boolean>}
    */
   window.__dispatchHover = async function(target, hoverDuration = 150) {
@@ -259,14 +253,14 @@
     target.dispatchEvent(new MouseEvent('mouseenter', opts));
     target.dispatchEvent(new MouseEvent('mousemove', opts));
 
-    // Maintain hover state for at least 100ms
     await new Promise(r => setTimeout(r, duration));
-
     return true;
   };
 
   /**
    * Simulates typing text into an input or editable element with React controlled input support.
+   * Preserves unicode surrogate pairs (emojis) without splitting them.
+   * Properly calls target.blur() and dispatches focusout.
    * @param {Element} target
    * @param {string} text
    * @param {boolean} [clearValue=true]
@@ -302,8 +296,10 @@
       currentVal = target.value || target.innerText || '';
     }
 
-    for (let i = 0; i < text.length; i++) {
-      const char = text[i];
+    // Use Array.from(text) to preserve multi-byte unicode surrogate pairs (emojis)
+    const characters = Array.from(String(text));
+
+    for (const char of characters) {
       const code = computeKeyCode(char);
       const keyOpts = { key: char, code, bubbles: true, cancelable: true };
 
@@ -326,14 +322,19 @@
     }
 
     target.dispatchEvent(new Event('change', { bubbles: true }));
+    if (typeof target.blur === 'function') {
+      target.blur();
+    }
     target.dispatchEvent(new Event('blur', { bubbles: true }));
+    target.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
   };
 
   /**
-   * Sets value in standard or custom form elements.
+   * Directly sets value in standard or custom form elements with immediate native dispatch
+   * and value verification, avoiding 30s timeouts on large cover letters or textareas.
    * @param {string} refId
    * @param {any} val
-   * @returns {Promise<{ success: boolean, message: string }>}
+   * @returns {Promise<{ success: boolean, verifiedValue?: any, message: string }>}
    */
   window.__setFormValue = async function(refId, val) {
     const el = window.__getElementByRef ? window.__getElementByRef(refId) : null;
@@ -343,12 +344,31 @@
 
     const tag = el.tagName.toUpperCase();
     const type = (el.getAttribute('type') || '').toLowerCase();
+    const role = (el.getAttribute('role') || '').toLowerCase();
 
     // Checkbox or Radio
     if (tag === 'INPUT' && (type === 'checkbox' || type === 'radio')) {
-      const shouldCheck = (val === false || val === 'false' || val === 0 || val === '0') ? false : Boolean(val);
+      const strVal = String(val).toLowerCase().trim();
+      const isFalsy = val === false || val === 0 || strVal === 'false' || strVal === '0' || strVal === 'no' || strVal === 'off' || strVal === 'unchecked';
+      const shouldCheck = !isFalsy;
+
+      if (type === 'radio') {
+        if (!shouldCheck && el.checked) {
+          throw new Error(`Cannot uncheck radio button '${refId}'. In standard HTML, radio buttons can only be unselected by selecting another radio option in the same group.`);
+        }
+        if (shouldCheck && !el.checked) {
+          const label = (el.labels && el.labels[0]) || (el.id ? document.querySelector(`label[for="${CSS.escape(el.id)}"]`) : null) || el.closest('label');
+          if (label) {
+            label.click();
+          } else {
+            el.click();
+          }
+        }
+        return { success: true, verifiedValue: el.checked, message: `Radio '${refId}' is ${el.checked ? 'selected' : 'unselected'}.` };
+      }
+
+      // Checkbox
       if (el.checked !== shouldCheck) {
-        // Modern styled forms (Greenhouse, Lever, Workday) attach state listeners to <label>
         const label = (el.labels && el.labels[0]) || (el.id ? document.querySelector(`label[for="${CSS.escape(el.id)}"]`) : null) || el.closest('label');
         if (label) {
           label.click();
@@ -368,7 +388,7 @@
           el.dispatchEvent(new Event('input', { bubbles: true }));
         }
       }
-      return { success: true, message: `Set ${type} '${refId}' to ${shouldCheck}` };
+      return { success: true, verifiedValue: el.checked, message: `Set checkbox '${refId}' to ${shouldCheck}` };
     }
 
     // Label element directly passed
@@ -379,38 +399,78 @@
 
     // Standard Select
     if (tag === 'SELECT') {
-      const strVal = String(val).toLowerCase();
+      const strVal = String(val).toLowerCase().trim();
       let matchedIndex = -1;
       for (let i = 0; i < el.options.length; i++) {
         const opt = el.options[i];
-        if (opt.value.toLowerCase() === strVal || opt.text.trim().toLowerCase() === strVal) {
+        if (opt.value.toLowerCase().trim() === strVal || opt.text.trim().toLowerCase() === strVal) {
           matchedIndex = i;
           break;
         }
       }
 
-      if (matchedIndex !== -1) {
-        el.selectedIndex = matchedIndex;
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        return { success: true, message: `Selected option '${el.options[matchedIndex].text}' on select '${refId}'` };
-      } else {
-        setNativeValue(el, String(val));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-        return { success: true, message: `Set select value to '${val}'` };
+      if (matchedIndex === -1) {
+        const available = Array.from(el.options).map(o => o.text.trim()).filter(Boolean).slice(0, 10).join(', ');
+        throw new Error(`Option '${val}' not found in <select> '${refId}'. Available options: ${available}`);
       }
+
+      el.selectedIndex = matchedIndex;
+      el.options[matchedIndex].selected = true;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return {
+        success: true,
+        verifiedValue: el.options[matchedIndex].text,
+        message: `Selected option '${el.options[matchedIndex].text}' on select '${refId}'`
+      };
     }
 
-    // Text inputs, textareas, contenteditable
-    await window.__simulateTyping(el, String(val), true, 20);
-    return { success: true, message: `Filled '${refId}' with specified value.` };
+    // Custom Combobox container (e.g. React-Select, Radix, MUI)
+    if (role === 'combobox' && tag !== 'INPUT') {
+      const innerInput = el.querySelector('input:not([type="hidden"]), textarea');
+      if (innerInput) {
+        setNativeValue(innerInput, String(val));
+        innerInput.dispatchEvent(new Event('input', { bubbles: true }));
+        innerInput.dispatchEvent(new Event('change', { bubbles: true }));
+        return { success: true, verifiedValue: innerInput.value, message: `Filled combobox input '${refId}' with '${val}'.` };
+      }
+      // If no inner input, click to trigger dropdown listbox
+      el.click();
+      return { success: true, message: `Clicked custom combobox '${refId}' to expand options.` };
+    }
+
+    // Direct Native Input, Textarea, Date, Number, etc.
+    // Set value directly without 20ms/char delay so multi-paragraph cover letters do not time out
+    const strVal = String(val);
+    if ('value' in el) {
+      setNativeValue(el, strVal);
+    } else if (el.isContentEditable) {
+      el.innerText = strVal;
+    }
+
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    if (typeof el.blur === 'function') {
+      el.blur();
+    }
+    el.dispatchEvent(new Event('blur', { bubbles: true }));
+    el.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+
+    const verified = el.value !== undefined ? el.value : el.innerText;
+    return {
+      success: true,
+      verifiedValue: verified,
+      message: `Directly filled '${refId}' with value.`
+    };
   };
 
   /**
    * Injects files into an <input type="file"> element using DataTransfer.
+   * Automatically resolves dropzone wrappers or labels to their inner file input,
+   * validates target type, and respects the multiple attribute.
    * @param {string} refId
-   * @param {Array<{ name: string, data?: string, mimeType?: string }>} filesPayload
-   * @returns {Promise<{ success: boolean, message: string }>}
+   * @param {Array<{ name: string, data?: string, mimeType?: string, type?: string }>} filesPayload
+   * @returns {Promise<{ success: boolean, filesAttached: string[], message: string }>}
    */
   window.__injectFiles = async function(refId, filesPayload) {
     const el = window.__getElementByRef ? window.__getElementByRef(refId) : null;
@@ -418,20 +478,39 @@
       throw new Error(`Element '${refId}' not found.`);
     }
 
+    // Dropzone or Label to <input type="file"> resolution
+    let fileInput = el;
+    if (el.tagName !== 'INPUT' || (el.getAttribute('type') || '').toLowerCase() !== 'file') {
+      fileInput =
+        el.querySelector('input[type="file"]') ||
+        (el.id ? document.querySelector(`input[type="file"][id="${CSS.escape(el.id)}"]`) : null) ||
+        (el.htmlFor ? document.getElementById(el.htmlFor) : null) ||
+        el.closest('[class*="upload" i], [class*="dropzone" i], [class*="field-" i], form')?.querySelector('input[type="file"]');
+    }
+
+    if (!fileInput || fileInput.tagName !== 'INPUT' || (fileInput.getAttribute('type') || '').toLowerCase() !== 'file') {
+      throw new Error(`Target element '${refId}' is not an <input type="file"> and no file input was found in its container.`);
+    }
+
     if (!Array.isArray(filesPayload) || filesPayload.length === 0) {
       throw new Error("No files provided in filesPayload.");
     }
 
+    // Respect the multiple attribute
+    let filesToAttach = filesPayload;
+    if (!fileInput.multiple && filesPayload.length > 1) {
+      filesToAttach = [filesPayload[0]];
+    }
+
     const dt = new DataTransfer();
 
-    for (const f of filesPayload) {
-      const mime = f.mimeType || (f.name.endsWith('.pdf') ? 'application/pdf' : 'text/plain');
+    for (const f of filesToAttach) {
+      const mime = f.mimeType || f.type || (f.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'text/plain');
 
       if (!f.data) {
         throw new Error(`File '${f.name}' has no binary or text data provided. Please upload the file first.`);
       }
 
-      // Handle standard and URL-safe base64
       let base64Clean = f.data.replace(/^data:[^;]+;base64,/, '').trim();
       base64Clean = base64Clean.replace(/-/g, '+').replace(/_/g, '/');
       while (base64Clean.length % 4) {
@@ -446,50 +525,14 @@
       dt.items.add(file);
     }
 
-    el.files = dt.files;
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-    el.dispatchEvent(new Event('input', { bubbles: true }));
+    fileInput.files = dt.files;
+    fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+    fileInput.dispatchEvent(new Event('input', { bubbles: true }));
 
     return {
       success: true,
-      filesAttached: filesPayload.map(f => f.name),
-      message: `Attached ${filesPayload.length} file(s) to input '${refId}'.`
+      filesAttached: filesToAttach.map(f => f.name),
+      message: `Attached ${filesToAttach.length} file(s) to input '${refId}'.`
     };
-  };
-
-  /**
-   * Performs an HTML5 and pointer drag sequence from start element to end element.
-   * @param {Element} startEl
-   * @param {Element} endEl
-   * @param {number} sx - Start X
-   * @param {number} sy - Start Y
-   * @param {number} ex - End X
-   * @param {number} ey - End Y
-   */
-  window.__dispatchDrag = function(startEl, endEl, sx, sy, ex, ey) {
-    const dt = new DataTransfer();
-
-    // 1. Pointer & Mouse down
-    startEl.dispatchEvent(new PointerEvent('pointerdown', { clientX: sx, clientY: sy, bubbles: true }));
-    startEl.dispatchEvent(new MouseEvent('mousedown', { clientX: sx, clientY: sy, bubbles: true }));
-
-    // 2. HTML5 dragstart
-    startEl.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: dt, clientX: sx, clientY: sy }));
-
-    // 3. Move & dragenter/dragover on drop target
-    startEl.dispatchEvent(new PointerEvent('pointermove', { clientX: ex, clientY: ey, bubbles: true }));
-    startEl.dispatchEvent(new MouseEvent('mousemove', { clientX: ex, clientY: ey, bubbles: true }));
-
-    endEl.dispatchEvent(new DragEvent('dragenter', { bubbles: true, cancelable: true, dataTransfer: dt, clientX: ex, clientY: ey }));
-    endEl.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt, clientX: ex, clientY: ey }));
-
-    // 4. Drop & dragend
-    endEl.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt, clientX: ex, clientY: ey }));
-    startEl.dispatchEvent(new DragEvent('dragend', { bubbles: true, cancelable: true, dataTransfer: dt, clientX: ex, clientY: ey }));
-
-    endEl.dispatchEvent(new PointerEvent('pointerup', { clientX: ex, clientY: ey, bubbles: true }));
-    endEl.dispatchEvent(new MouseEvent('mouseup', { clientX: ex, clientY: ey, bubbles: true }));
-
-    return true;
   };
 })();

@@ -21,7 +21,6 @@
   "author": "Himanshu Sultania",
   "license": "MIT",
   "dependencies": {
-    "ws": "^8.18.0",
-    "zod": "^3.23.8"
+    "ws": "^8.18.0"
   }
 }

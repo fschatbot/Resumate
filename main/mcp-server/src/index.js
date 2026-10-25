@@ -8,10 +8,11 @@
  * Chrome Extension via local WebSocket.
  *
  * Features:
- * 1. Stateful DOM mutation tracking and delta-only updates for action tools.
+ * 1. Stateful DOM mutation tracking and delta-only updates for action tools without redundant double-snapshots.
  * 2. Pruned flat-matrix accessibility snapshots (@e... -> role "name" [states]).
  * 3. Dynamic MCP resource tracking channels (browser://current-page/interactive-elements and ax-tree).
  * 4. Automatic template resolution (${preferences.*}) and bidirectional preference sync.
+ * 5. Full JSON-RPC 2.0 batch request and protocol version negotiation support.
  */
 
 import readline from 'node:readline';
@@ -27,6 +28,8 @@ import {
   handleStoreFile,
   handleListFiles,
   handleReadFile,
+  handleDeleteFile,
+  handleClearPreferences,
   setSyncCallback
 } from './tools/schema-tools.js';
 import {
@@ -60,15 +63,21 @@ bridge.on('extension_event', (msg) => {
   if (msg.type === 'preferences_updated' && msg.payload) {
     console.error('[MCP Server] Preferences synchronized from browser extension upload.');
     setPreferences(msg.payload, 'extension_upload');
+  } else if (msg.type === 'preferences_cleared') {
+    console.error('[MCP Server] Preferences cleared from browser extension side panel.');
+    handleClearPreferences();
   } else if (msg.type === 'file_uploaded' && msg.payload) {
     console.error(`[MCP Server] File '${msg.payload.name}' synchronized from browser extension upload.`);
     handleStoreFile(msg.payload);
+  } else if (msg.type === 'file_deleted' && msg.payload?.name) {
+    console.error(`[MCP Server] File '${msg.payload.name}' deleted from browser extension.`);
+    handleDeleteFile(msg.payload.name);
   }
 });
 
 /**
  * Sends a JSON-RPC response to stdout.
- * @param {object} response
+ * @param {object|array} response
  */
 function sendResponse(response) {
   const jsonStr = JSON.stringify(response);
@@ -162,67 +171,77 @@ function formatToolError(error) {
 }
 
 /**
- * Dispatches MCP JSON-RPC requests.
+ * Dispatches an individual MCP JSON-RPC request and returns the response object (or null for notifications).
  * @param {object} request
+ * @returns {Promise<object|null>}
  */
-async function handleJsonRpcRequest(request) {
+async function processJsonRpcRequest(request) {
   const { id, method, params } = request;
   const isNotification = id === undefined || id === null;
 
   try {
     switch (method) {
       case "initialize": {
-        if (isNotification) return;
-        return sendResponse({
+        if (isNotification) return null;
+        // Dynamically negotiate protocol version with the client
+        const protocolVersion = params?.protocolVersion || "2024-11-05";
+        return {
           jsonrpc: "2.0",
           id,
           result: {
-            protocolVersion: "2024-11-05",
+            protocolVersion,
             serverInfo: {
               name: SERVER_NAME,
               version: SERVER_VERSION
             },
             capabilities: {
               tools: {},
-              resources: {}
+              resources: {
+                subscribe: true
+              }
             }
           }
-        });
+        };
       }
 
       case "notifications/initialized":
       case "initialized": {
         // Notification, no response permitted
-        return;
+        return null;
+      }
+
+      case "notifications/cancelled": {
+        // Notification for client cancellation
+        return null;
       }
 
       case "ping": {
-        if (isNotification) return;
-        return sendResponse({ jsonrpc: "2.0", id, result: {} });
+        if (isNotification) return null;
+        return { jsonrpc: "2.0", id, result: {} };
       }
 
       case "tools/list": {
-        if (isNotification) return;
-        return sendResponse({
+        if (isNotification) return null;
+        return {
           jsonrpc: "2.0",
           id,
           result: {
             tools: TOOL_CATALOG
           }
-        });
+        };
       }
 
       case "tools/call": {
-        if (isNotification) return;
+        if (isNotification) return null;
         let toolName = params?.name;
         const rawArgs = params?.arguments || {};
 
         if (!toolName) {
-          return sendResponse({
+          return {
             jsonrpc: "2.0",
             id,
             error: { code: -32602, message: "Missing required 'name' in tools/call" }
-          });
+          };
         }
 
         // Support read_page as alias for browser_snapshot
@@ -231,11 +250,11 @@ async function handleJsonRpcRequest(request) {
         }
 
         if (!TOOLS_BY_NAME.has(toolName) && toolName !== "browser_snapshot") {
-          return sendResponse({
+          return {
             jsonrpc: "2.0",
             id,
             error: { code: -32601, message: `Tool not found: '${toolName}'` }
-          });
+          };
         }
 
         // Validate required arguments declared in tool schema
@@ -243,20 +262,29 @@ async function handleJsonRpcRequest(request) {
         if (toolDef?.inputSchema?.required) {
           for (const reqField of toolDef.inputSchema.required) {
             if (rawArgs[reqField] === undefined || rawArgs[reqField] === null) {
-              return sendResponse({
+              return {
                 jsonrpc: "2.0",
                 id,
                 result: formatToolError(`Missing required argument '${reqField}' for tool '${toolName}'.`)
-              });
+              };
             }
           }
         }
 
         // Automatic template substitution: resolve ${preferences.path} references
-        // But do not corrupt raw arguments for set_preferences or update_preferences_section
-        const resolvedArgs = (toolName === "set_preferences" || toolName === "update_preferences_section")
-          ? rawArgs
-          : resolveTemplateVariables(rawArgs);
+        // Do not corrupt raw arguments for set_preferences or update_preferences_section
+        let resolvedArgs;
+        try {
+          resolvedArgs = (toolName === "set_preferences" || toolName === "update_preferences_section")
+            ? rawArgs
+            : resolveTemplateVariables(rawArgs);
+        } catch (templateErr) {
+          return {
+            jsonrpc: "2.0",
+            id,
+            result: formatToolError(templateErr)
+          };
+        }
 
         let executionResult;
         let postMutationDelta = null;
@@ -276,6 +304,8 @@ async function handleJsonRpcRequest(request) {
             executionResult = handleListFiles();
           } else if (toolName === "read_file") {
             executionResult = handleReadFile(resolvedArgs);
+          } else if (toolName === "delete_file") {
+            executionResult = handleDeleteFile(resolvedArgs.name);
           } else if (toolName === "get_tool_definitions") {
             if (resolvedArgs.toolName) {
               const found = TOOL_CATALOG.find(t => t.name.toLowerCase() === String(resolvedArgs.toolName).toLowerCase());
@@ -297,44 +327,38 @@ async function handleJsonRpcRequest(request) {
               ...resolvedArgs,
               filter: filterArg
             });
-            postMutationDelta = globalAXTreeTracker.updatePageState(executionResult);
+            postMutationDelta = globalAXTreeTracker.updatePageState(executionResult, resolvedArgs.tabId);
           } else {
-            // Browser action tool execution
+            // Browser action tool execution: run once!
             executionResult = await bridge.executeTool(toolName, resolvedArgs);
 
-            // If this is a mutating browser tool, evaluate post-mutation delta immediately
+            // The browser extension automatically captures and returns the contextual post-action delta
+            // DO NOT fire a second redundant browser_snapshot which resets baseline and discards the real delta!
             if (globalAXTreeTracker.isMutatingTool(toolName)) {
-              try {
-                const snap = await bridge.executeTool("browser_snapshot", {
-                  filter: "interactive",
-                  depth: 30
-                });
-                if (snap) {
-                  postMutationDelta = globalAXTreeTracker.updatePageState(snap);
-                }
-              } catch (snapErr) {
-                // Navigation or closed tab, non-fatal
+              if (executionResult && (executionResult.compactTree || executionResult.yaml)) {
+                globalAXTreeTracker.updatePageState(executionResult, resolvedArgs.tabId);
               }
+              postMutationDelta = executionResult?.delta || null;
             }
           }
 
-          return sendResponse({
+          return {
             jsonrpc: "2.0",
             id,
             result: formatToolSuccess(executionResult, toolName, postMutationDelta, resolvedArgs)
-          });
+          };
         } catch (toolErr) {
-          return sendResponse({
+          return {
             jsonrpc: "2.0",
             id,
             result: formatToolError(toolErr)
-          });
+          };
         }
       }
 
       case "resources/list": {
-        if (isNotification) return;
-        return sendResponse({
+        if (isNotification) return null;
+        return {
           jsonrpc: "2.0",
           id,
           result: {
@@ -365,40 +389,45 @@ async function handleJsonRpcRequest(request) {
               }
             ]
           }
-        });
+        };
       }
 
       case "resources/templates/list": {
-        if (isNotification) return;
-        return sendResponse({
+        if (isNotification) return null;
+        return {
           jsonrpc: "2.0",
           id,
           result: {
             resourceTemplates: []
           }
-        });
+        };
+      }
+
+      case "resources/subscribe":
+      case "resources/unsubscribe": {
+        if (isNotification) return null;
+        return { jsonrpc: "2.0", id, result: {} };
       }
 
       case "prompts/list": {
-        if (isNotification) return;
-        return sendResponse({
+        if (isNotification) return null;
+        return {
           jsonrpc: "2.0",
           id,
           result: {
             prompts: []
           }
-        });
+        };
       }
 
       case "resources/read": {
-        if (isNotification) return;
+        if (isNotification) return null;
         const uri = params?.uri;
 
         if (uri && (uri.startsWith("browser://current-page") || uri.startsWith("browser://active-tab"))) {
           try {
             const isYaml = uri.includes("ax-tree") && !uri.includes("interactive");
 
-            // Check if tracker already has fresh cached tree (< 3000ms old)
             let resourceText = "";
             const isFresh = globalAXTreeTracker.lastUpdated && (Date.now() - globalAXTreeTracker.lastUpdated < 3000);
             if (isFresh && (isYaml ? globalAXTreeTracker.latestYaml : globalAXTreeTracker.latestCompactTree)) {
@@ -414,7 +443,7 @@ async function handleJsonRpcRequest(request) {
               resourceText = isYaml ? globalAXTreeTracker.getAxTreeResource() : globalAXTreeTracker.getInteractiveElementsResource();
             }
 
-            return sendResponse({
+            return {
               jsonrpc: "2.0",
               id,
               result: {
@@ -426,19 +455,19 @@ async function handleJsonRpcRequest(request) {
                   }
                 ]
               }
-            });
+            };
           } catch (resErr) {
-            return sendResponse({
+            return {
               jsonrpc: "2.0",
               id,
               error: { code: -32000, message: `Failed to read page accessibility tree: ${resErr.message}` }
-            });
+            };
           }
         }
 
         if (uri === "preference://active") {
           const prefs = getLoadedPreferences();
-          return sendResponse({
+          return {
             jsonrpc: "2.0",
             id,
             result: {
@@ -450,13 +479,13 @@ async function handleJsonRpcRequest(request) {
                 }
               ]
             }
-          });
+          };
         }
 
         if (uri === "schema://preferences") {
           const schemaPath = path.resolve(__dirname, '../../preferences/preferences.schema.json');
           const schemaText = fs.existsSync(schemaPath) ? fs.readFileSync(schemaPath, 'utf8') : "{}";
-          return sendResponse({
+          return {
             jsonrpc: "2.0",
             id,
             result: {
@@ -468,34 +497,35 @@ async function handleJsonRpcRequest(request) {
                 }
               ]
             }
-          });
+          };
         }
 
-        return sendResponse({
+        return {
           jsonrpc: "2.0",
           id,
           error: { code: -32602, message: `Unknown resource URI: '${uri}'` }
-        });
+        };
       }
 
       default: {
-        if (isNotification) return;
-        return sendResponse({
+        if (isNotification) return null;
+        return {
           jsonrpc: "2.0",
           id,
           error: { code: -32601, message: `Method not implemented: '${method}'` }
-        });
+        };
       }
     }
   } catch (err) {
     console.error(`[MCP Server] Error executing method '${method}':`, err);
     if (!isNotification) {
-      return sendResponse({
+      return {
         jsonrpc: "2.0",
         id,
         error: { code: -32603, message: err.message || "Internal server error" }
-      });
+      };
     }
+    return null;
   }
 }
 
@@ -523,12 +553,20 @@ rl.on('line', async (line) => {
           error: { code: -32600, message: "Invalid Request: empty batch" }
         });
       }
+      const batchResponses = [];
       for (const item of parsed) {
-        await handleJsonRpcRequest(item);
+        const resp = await processJsonRpcRequest(item);
+        if (resp) batchResponses.push(resp);
+      }
+      if (batchResponses.length > 0) {
+        sendResponse(batchResponses);
       }
       return;
     }
-    await handleJsonRpcRequest(parsed);
+    const response = await processJsonRpcRequest(parsed);
+    if (response) {
+      sendResponse(response);
+    }
   } catch (err) {
     console.error("[MCP Server] Received malformed JSON line:", trimmed);
     sendResponse({

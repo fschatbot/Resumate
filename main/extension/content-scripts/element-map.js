@@ -5,12 +5,13 @@
  * 1. WeakRef memory management to prevent leaks across SPA lifecycles.
  * 2. Deterministic Semantic Anchor Recycling: preserves @eX handles across React/Vue DOM remounts.
  * 3. Live Self-Healing Resolution: automatically recovers replaced DOM nodes during batch execution.
- * 4. Deep Shadow DOM & open iframe traversal for selector and semantic lookups.
+ * 4. Deep Shadow DOM & same-origin iframe traversal for selector and semantic lookups.
+ * 5. Viewport coordinate translation for iframe-embedded elements.
  */
 
 (() => {
-  if (window.__claudeElementMapInitialized) return;
-  window.__claudeElementMapInitialized = true;
+  if (window.__autoResumeElementMapInitialized) return;
+  window.__autoResumeElementMapInitialized = true;
 
   // Primary map: "@e1" | "e1" | "ref_1" -> WeakRef<Element>
   window.__claudeElementMap = window.__claudeElementMap || {};
@@ -41,7 +42,6 @@
     const nameAttr = el.getAttribute("name") || "";
     const autoId = el.getAttribute("data-automation-id") || el.getAttribute("data-testid") || el.getAttribute("data-test") || el.getAttribute("data-qa") || "";
 
-    // Accessible name or stable text
     const label = (hint.name || el.getAttribute("aria-label") || el.getAttribute("placeholder") || (tag === "input" && (type === "radio" || type === "checkbox") ? el.value : "") || "")
       .trim()
       .toLowerCase()
@@ -49,7 +49,6 @@
 
     const group = (hint.groupName || "").trim().toLowerCase().slice(0, 60);
 
-    // Calculate relative position among same-tag siblings for disambiguation
     let siblingIndex = 0;
     if (el.parentElement) {
       const children = el.parentElement.children;
@@ -64,6 +63,7 @@
 
   /**
    * Builds a lightweight CSS path fallback for self-healing recovery.
+   * Distinguishes data-automation-id and data-testid properly.
    * @param {Element} el
    * @returns {string}
    */
@@ -88,9 +88,12 @@
         } catch (e) {}
       } else {
         const nameAttr = curr.getAttribute("name");
-        const autoId = curr.getAttribute("data-automation-id") || curr.getAttribute("data-testid");
+        const autoId = curr.getAttribute("data-automation-id");
+        const testId = curr.getAttribute("data-testid");
         if (autoId) {
           selector += `[data-automation-id="${CSS.escape(autoId)}"]`;
+        } else if (testId) {
+          selector += `[data-testid="${CSS.escape(testId)}"]`;
         } else if (nameAttr) {
           selector += `[name="${CSS.escape(nameAttr)}"]`;
         } else if (curr.parentElement) {
@@ -164,8 +167,8 @@
   }
 
   /**
-   * Collects all elements across Light DOM and open Shadow DOM roots.
-   * @param { string } [selector='*']
+   * Collects all elements across Light DOM, open Shadow DOM roots, and same-origin iframes.
+   * @param {string} [selector='*']
    * @returns {Element[]}
    */
   function queryAllDeep(selector = "*") {
@@ -183,6 +186,14 @@
       for (let i = 0; i < all.length; i++) {
         if (all[i].shadowRoot) {
           walk(all[i].shadowRoot);
+        }
+        if (all[i].tagName === 'IFRAME') {
+          try {
+            const iframeDoc = all[i].contentDocument;
+            if (iframeDoc) walk(iframeDoc);
+          } catch (e) {
+            // Cross-origin iframe, skipped safely
+          }
         }
       }
     }
@@ -257,7 +268,6 @@
   window.__registerElementRef = function (node, hint = {}) {
     if (!node || !(node instanceof Element)) return null;
 
-    // 1. Check if this exact DOM instance already has a valid assigned ID
     if (node.__autoResumeRefId && window.__claudeElementMap[node.__autoResumeRefId]) {
       const existing = window.__claudeElementMap[node.__autoResumeRefId].deref();
       if (existing === node && existing.isConnected) {
@@ -266,13 +276,11 @@
       }
     }
 
-    // 2. Check if this node is a React/SPA remount of a previously registered semantic anchor
     const semanticKey = computeSemanticAnchorKey(node, hint);
     if (semanticKey && semanticKeyToRef.has(semanticKey)) {
       const previousAtId = semanticKeyToRef.get(semanticKey);
       const prevWeak = window.__claudeElementMap[previousAtId];
       const prevEl = prevWeak ? prevWeak.deref() : null;
-      // Only recycle if the previous DOM node is disconnected or is the same node
       if (!prevEl || !prevEl.isConnected || prevEl === node) {
         bindRefToElement(previousAtId, node, hint);
         return previousAtId;
@@ -291,6 +299,7 @@
   /**
    * Dereferences an element handle (@e1, e1, ref_1), semantic role/name query, XPath, or CSS selector.
    * Automatically attempts self-healing if a referenced node was replaced by a framework re-render.
+   * For role/name queries, prefers exact matches and checks visibility before substring matches.
    * @param {string} refId
    * @returns {Element|null}
    */
@@ -308,7 +317,6 @@
         const el = weakRef.deref();
         if (el && el.isConnected) return el;
       }
-      // Attempt live self-healing recovery if node was remounted
       const healed = attemptSelfHeal(canonicalAtId);
       if (healed) return healed;
       return null;
@@ -336,7 +344,13 @@
       const targetRole = roleMatch[1].toLowerCase().replace(/:.*$/, "");
       const targetName = roleMatch[2].toLowerCase().trim();
       const candidates = queryAllDeep("button, a, input, select, textarea, [role], label");
+
+      let substringFallback = null;
+
       for (const el of candidates) {
+        // Only consider visible elements
+        if (el.offsetWidth === 0 && el.offsetHeight === 0 && el.getClientRects().length === 0) continue;
+
         const rawRole = (el.getAttribute("role") || "").toLowerCase();
         const tag = el.tagName.toLowerCase();
         let matchesRole = rawRole === targetRole;
@@ -349,24 +363,38 @@
           else if (targetRole === "radio" && tag === "input" && el.type === "radio") matchesRole = true;
           else if (targetRole === "file" && tag === "input" && el.type === "file") matchesRole = true;
         }
+
         if (matchesRole) {
           const labelText = (el.getAttribute("aria-label") || el.getAttribute("placeholder") || (el.labels && el.labels[0] ? el.labels[0].textContent : "") || el.textContent || el.value || "")
             .trim()
             .toLowerCase();
-          if (labelText === targetName || labelText.includes(targetName)) {
+
+          // Prefer exact match
+          if (labelText === targetName) {
             return el;
+          }
+
+          // Save first word-boundary substring match as secondary fallback
+          if (!substringFallback && (labelText.startsWith(`${targetName} `) || labelText.endsWith(` ${targetName}`) || labelText.includes(` ${targetName} `))) {
+            substringFallback = el;
           }
         }
       }
+
+      if (substringFallback) return substringFallback;
     }
 
     // 5. Standard & Shadow DOM CSS selector fallback
-    try {
-      const el = document.querySelector(normalized);
-      if (el) return el;
-      const deepMatches = queryAllDeep(normalized);
-      if (deepMatches.length > 0) return deepMatches[0];
-    } catch (e) {}
+    // Only query if string looks like an explicit CSS selector to avoid bare words like "button" grabbing random elements
+    const isExplicitCss = normalized.includes("#") || normalized.includes(".") || normalized.includes("[") || normalized.includes(">") || normalized.includes(":");
+    if (isExplicitCss) {
+      try {
+        const el = document.querySelector(normalized);
+        if (el) return el;
+        const deepMatches = queryAllDeep(normalized);
+        if (deepMatches.length > 0) return deepMatches[0];
+      } catch (e) {}
+    }
 
     return null;
   };
@@ -375,6 +403,7 @@
    * Calculates center coordinates of an element in CSS viewport pixels.
    * If the element itself is a zero-size/visually-hidden input (e.g. custom styled checkbox/radio/file),
    * automatically resolves the bounding box of its visible associated <label> or parent control wrapper.
+   * Offsets coordinates by iframe position if the element is inside an iframe.
    * @param {string} refId
    * @returns {{ success: boolean, x?: number, y?: number, width?: number, height?: number, visible?: boolean, tagName?: string, error?: string }}
    */
@@ -387,7 +416,6 @@
     let rect = el.getBoundingClientRect();
     let targetEl = el;
 
-    // If element is visually hidden (0x0 or opacity 0 custom input), use its visible label/wrapper for clicking
     if (rect.width < 2 || rect.height < 2) {
       const associatedLabel = (el.labels && el.labels[0]) || (el.id ? document.querySelector(`label[for="${CSS.escape(el.id)}"]`) : null) || el.closest("label") || el.parentElement;
       if (associatedLabel) {
@@ -399,13 +427,30 @@
       }
     }
 
+    // Offset coordinates if element resides within a subframe
+    let offsetX = 0;
+    let offsetY = 0;
+    if (targetEl.ownerDocument && targetEl.ownerDocument !== document) {
+      const iframes = document.querySelectorAll('iframe');
+      for (const iframe of iframes) {
+        try {
+          if (iframe.contentDocument === targetEl.ownerDocument) {
+            const ifrRect = iframe.getBoundingClientRect();
+            offsetX += ifrRect.left;
+            offsetY += ifrRect.top;
+            break;
+          }
+        } catch (e) {}
+      }
+    }
+
     const style = window.getComputedStyle(targetEl);
     const isVisible = rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
 
     return {
       success: true,
-      x: Math.round(rect.left + rect.width / 2),
-      y: Math.round(rect.top + rect.height / 2),
+      x: Math.round(rect.left + offsetX + rect.width / 2),
+      y: Math.round(rect.top + offsetY + rect.height / 2),
       width: Math.round(rect.width),
       height: Math.round(rect.height),
       visible: isVisible,

@@ -12,7 +12,7 @@ export const DEFAULT_TIMEOUT_MS = 30000;
 
 export const NO_EXTENSION_MESSAGE = 
   "No active browser tab connected to AutoResume. " +
-  "Please click the AutoResume extension icon in Chrome and ensure the target tab is in the 'AutoResume (MCP)' tab group.";
+  "Please open the target job application tab in Chrome, click the 'Target' button in the AutoResume side panel, or call the 'tabs_target' tool.";
 
 /**
  * Frees the port if an orphaned/zombie process is holding it.
@@ -62,15 +62,15 @@ export class ExtensionBridge extends EventEmitter {
    */
   async start() {
     return new Promise((resolve) => {
-      // Clean up any stale process occupying the port
       freePortIfOccupied(this.port);
 
       this.httpServer = http.createServer((req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
+        // Sanitize status response to prevent leaking private tab URLs over unauthenticated local HTTP
         res.end(JSON.stringify({
           status: 'AutoResume MCP Bridge Active',
           connected: this.isConnected,
-          activeTab: this.activeTabInfo
+          mcpTargetedTabId: this.activeTabInfo?.tabId || null
         }));
       });
 
@@ -188,6 +188,15 @@ export class ExtensionBridge extends EventEmitter {
     try {
       const msg = JSON.parse(rawText);
 
+      // Handle keepalive pings without bubbling as spurious extension events
+      if (msg.type === 'ping') {
+        this.sendNotification('pong', { timestamp: Date.now() });
+        return;
+      }
+      if (msg.type === 'pong') {
+        return;
+      }
+
       if (msg.type === 'tab_status' || msg.type === 'tab_connected') {
         this.activeTabInfo = msg.payload || msg;
         this.emit('tab_update', this.activeTabInfo);
@@ -219,11 +228,19 @@ export class ExtensionBridge extends EventEmitter {
     }
 
     let effectiveTimeout = timeoutMs;
-    if (params && params.timeoutMs) {
+    // Guard against NaN or invalid numbers firing timeout immediately
+    if (params && params.timeoutMs !== undefined && !isNaN(Number(params.timeoutMs)) && Number(params.timeoutMs) > 0) {
       effectiveTimeout = Math.max(1000, Number(params.timeoutMs));
     } else if (toolName === 'browser_batch' && Array.isArray(params?.actions)) {
-      effectiveTimeout = Math.max(DEFAULT_TIMEOUT_MS, params.actions.length * 4000);
-    } else if (toolName === 'browser_wait' && params?.time) {
+      // Calculate total duration including explicit waits inside batch
+      let waitTotalMs = 0;
+      for (const act of params.actions) {
+        if (act.tool === 'browser_wait' && act.params?.time) {
+          waitTotalMs += (Number(act.params.time) || 0) * 1000;
+        }
+      }
+      effectiveTimeout = Math.max(DEFAULT_TIMEOUT_MS, params.actions.length * 4000 + waitTotalMs + 5000);
+    } else if (toolName === 'browser_wait' && params?.time && !isNaN(Number(params.time))) {
       effectiveTimeout = Math.max(DEFAULT_TIMEOUT_MS, (Number(params.time) + 5) * 1000);
     }
 
@@ -239,6 +256,8 @@ export class ExtensionBridge extends EventEmitter {
       const timer = setTimeout(() => {
         if (this.pendingRequests.has(id)) {
           this.pendingRequests.delete(id);
+          // Inform extension to abort processing of timed-out task
+          this.sendNotification('tool_timeout', { id, tool: toolName });
           reject(new Error(`Tool execution for '${toolName}' timed out after ${effectiveTimeout}ms.`));
         }
       }, effectiveTimeout);

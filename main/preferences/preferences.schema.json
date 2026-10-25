@@ -26,12 +26,23 @@
           "required": ["countryCode", "digits10", "formatted"],
           "properties": {
             "countryCode": { "type": "string", "description": "Phone country dialing code (e.g. '+1')" },
-            "digits10": { "type": "string", "pattern": "^[0-9]{10}$", "description": "10-digit national telephone number" },
-            "formatted": { "type": "string", "description": "Full formatted phone number, e.g. '+1 (814) 206-5539'" }
+            "digits10": { "type": "string", "pattern": "^[0-9]{7,15}$", "description": "National telephone number digits (7 to 15 digits)" },
+            "formatted": { "type": "string", "description": "Full formatted phone number, e.g. '+1 (555) 234-5678'" }
           }
         },
         "address": {
           "type": "object",
+          "properties": {
+            "street": { "type": "string" },
+            "city": { "type": "string" },
+            "state": { "type": "string" },
+            "postalCode": { "type": "string" },
+            "country": { "type": "string" }
+          }
+        },
+        "location": {
+          "type": "object",
+          "description": "Alias for address for convenience in templates (city, state, country)",
           "properties": {
             "street": { "type": "string" },
             "city": { "type": "string" },
@@ -221,6 +232,8 @@
       "properties": {
         "legallyAuthorizedToWork": { "type": "boolean" },
         "requiresVisaSponsorship": { "type": "boolean" },
+        "authorizedInUS": { "type": "boolean", "description": "Alias for legallyAuthorizedToWork" },
+        "requiresSponsorship": { "type": "boolean", "description": "Alias for requiresVisaSponsorship" },
         "willRequireFutureSponsorship": { "type": "boolean" },
         "workAuthorizationType": { "type": "string", "description": "e.g. 'F-1 (OPT/CPT eligible)', 'US Citizen', 'Permanent Resident'" },
         "isOver18": { "type": "boolean" },
@@ -228,6 +241,14 @@
         "disabilityStatus": { "type": "string", "description": "e.g. 'No, I do not have a disability' or 'I decline to state'" },
         "gender": { "type": "string" },
         "raceOrEthnicity": { "type": "string" }
+      }
+    },
+    "workAuthorization": {
+      "type": "object",
+      "description": "Convenience alias for work authorization questions",
+      "properties": {
+        "authorizedInUS": { "type": "boolean" },
+        "requiresSponsorship": { "type": "boolean" }
       }
     },
     "customQA": {

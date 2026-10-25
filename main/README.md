@@ -19,7 +19,7 @@ flowchart TD
 
     subgraph MCPServer["main/mcp-server (Desktop MCP Server & Proxy)"]
         STDIO["stdio JSON-RPC 2.0 Handler"]
-        REG["Unified Tool Catalog (29 Tools)"]
+        REG["Unified Tool Catalog (37 Tools)"]
         TR["Template Substitution Engine (${preferences.*})"]
         VAL["Preferences Schema Validator"]
         WS_SRV["WebSocket Bridge Server (Port 9001)"]
@@ -110,7 +110,7 @@ AutoResume supports two flexible paths to provide resume and preference data:
 
 ---
 
-## Tool Catalog Summary (29 Tools)
+## Tool Catalog Summary (37 Tools)
 
 | Tool Name | Parameters | Description |
 |---|---|---|
@@ -120,23 +120,34 @@ AutoResume supports two flexible paths to provide resume and preference data:
 | `validate_preferences_schema` | `section`, `preferences` | Validates a preferences object or section against the official schema. |
 | `store_file` | `name`, `data`, `mimeType`, `description` | Registers a file (e.g. resume PDF) in session storage for web form injection. |
 | `list_files` | *(none)* | Lists all files currently stored or uploaded in session storage. |
-| `browser_navigate` | `url`, `force`, `tabId` | Navigates tab to URL or traverses history (`"back"` / `"forward"`). |
-| `browser_snapshot` | `filter`, `depth`, `tabId` | Returns Accessibility Tree serialized as YAML with `@eX` handles. |
+| `read_file` | `name`, `includeBase64` | Reads text and metadata of a stored resume/document file. |
+| `delete_file` | `name` | Removes a document from session and extension storage. |
+| `browser_navigate` | `url`, `force`, `tabId` | Navigates tab to an HTTP/HTTPS URL or traverses history (`"back"` / `"forward"`). |
+| `browser_go_back` | `tabId` | Navigates the active tab backward in history. |
+| `browser_go_forward` | `tabId` | Navigates the active tab forward in history. |
+| `browser_snapshot` | `filter`, `depth`, `format`, `rootRefId`, `deltaOnly` | Returns Accessibility Tree serialized as YAML or compact with `@eX` handles. |
+| `read_page` | `filter`, `maxChars` | Fast alias for `browser_snapshot` returning the interactive accessibility tree. |
+| `find` | `query` | Searches the live semantic AST by text, label, or role without resetting baseline. |
+| `get_page_text` | `maxChars`, `tabId` | Extracts structured text from main application container or primary form. |
 | `browser_screenshot` | `fullPage`, `tabId` | Captures high-res PNG screenshot with coordinate metadata. |
-| `browser_click` | `element`, `coordinates`, `button`, `clickCount` | Clicks target element or coordinate. |
-| `browser_hover` | `element`, `coordinates`, `tabId` | Hovers cursor over target element. |
+| `browser_click` | `element`, `coordinates`, `button`, `clickCount` | Clicks target element or coordinate with occlusion detection. |
+| `browser_double_click` | `element`, `coordinates`, `button` | Performs double click via trusted CDP. |
+| `browser_triple_click` | `element`, `coordinates`, `button` | Performs triple click via trusted CDP. |
+| `browser_hover` | `element`, `coordinates`, `duration` | Hovers cursor over target element (default 150ms). |
 | `browser_type` | `element`, `text`, `clearValue`, `delay` | Types text with human-like delay and `${preferences.*}` resolution. |
-| `browser_press_key` | `key`, `modifiers`, `tabId` | Sends keyboard key event (e.g. `Enter`, `Tab`, `Escape`). |
+| `browser_press_key` | `key`, `modifiers`, `tabId` | Dispatches trusted hardware keyboard events (`Enter`, `Tab`, `Escape`). |
 | `browser_select_option` | `element`, `values`, `tabId` | Selects option in `<select>` dropdown. |
 | `browser_wait` | `time` | Pauses execution for $N$ seconds (human pacing / DOM settling). |
 | `browser_drag` | `startElement`, `endElement`, `startCoordinates`, `endCoordinates` | Drags and drops elements or coordinates. |
 | `form_input` | `ref`, `value`, `tabId` | Directly sets values in form elements (text, select, radio, checkbox, date). |
 | `file_upload` | `ref`, `fileName`, `files`, `tabId` | Injects files (e.g. stored resume) into file input elements. |
 | `browser_batch` | `actions`, `stopOnError`, `tabId` | Executes atomic multi-action sequences with intermediate suppression. |
-| `tabs_context` | *(none)* | Lists tabs in active window. |
+| `tabs_context` | *(none)* | Lists tabs in active window with personal tab details redacted. |
 | `tabs_context_mcp` | `createIfEmpty` | Lists or initializes tabs in `AutoResume (MCP)` group. |
-| `tabs_create` | `url` | Creates a new tab inside MCP tab group. |
+| `tabs_create` | `url` | Creates a new tab inside MCP tab group (defaults to `"chrome://newtab"`). |
 | `tabs_close` | `tabId` | Closes a tab within MCP group. |
+| `tabs_target` | `tabId` | Targets and isolates a tab into the `AutoResume (MCP)` tab group. |
+| `tabs_untarget` | `tabId` | Untargets tab and detaches DevTools Protocol debugger. |
 | `browser_get_console_logs` | `onlyErrors`, `limit`, `tabId` | Retrieves browser console logs. |
-| `browser_get_network_requests` | `urlPattern`, `limit`, `tabId` | Inspects captured HTTP network requests. |
-| `javascript_exec` | `text`, `tabId` | Evaluates JavaScript in page REPL with credential redaction. |
+| `browser_get_network_requests` | `onlyErrors`, `urlPattern`, `limit`, `tabId` | Inspects captured HTTP network requests. |
+| `get_tool_definitions` | `toolName` | Returns full schema definitions for any tool on demand. |
