@@ -6,6 +6,12 @@
  * Implements the Model Context Protocol (MCP) JSON-RPC 2.0 interface over stdio,
  * bridging external AI agents (Claude Desktop, Cursor, Windsurf, Gemini, agy) to the
  * Chrome Extension via local WebSocket.
+ *
+ * Features:
+ * 1. Stateful DOM mutation tracking and delta-only updates for action tools.
+ * 2. Pruned flat-matrix accessibility snapshots (@e... -> role "name" [states]).
+ * 3. Dynamic MCP resource tracking channels (browser://current-page/interactive-elements and ax-tree).
+ * 4. Automatic template resolution (${preferences.*}) and bidirectional preference sync.
  */
 
 import readline from 'node:readline';
@@ -30,6 +36,7 @@ import {
   setPreferences
 } from './utils/template-resolver.js';
 import { ExtensionBridge, DEFAULT_WS_PORT } from './bridge/ws-bridge.js';
+import { globalAXTreeTracker } from './utils/ax-tree-tracker.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -70,10 +77,14 @@ function sendResponse(response) {
 
 /**
  * Formats a successful tool result into standard MCP content block.
+ * Uses minimalist status + delta for mutating actions, and clean text for snapshots.
  * @param {any} result
+ * @param {string} [toolName]
+ * @param {object} [delta]
+ * @param {object} [options]
  * @returns {object}
  */
-function formatToolSuccess(result) {
+function formatToolSuccess(result, toolName, delta, options) {
   if (result && result.screenshotBase64) {
     return {
       content: [
@@ -87,6 +98,32 @@ function formatToolSuccess(result) {
           text: result.message || "Screenshot captured successfully."
         }
       ]
+    };
+  }
+
+  // Snapshot response: format as compact flat matrix, YAML, or delta
+  if (toolName === "browser_snapshot") {
+    if (options?.deltaOnly || options?.filter === "delta" || result?.isDeltaOnly) {
+      const deltaText = (delta && delta.deltaText) || result?.delta?.deltaText || "[No DOM mutations detected]";
+      return {
+        content: [{ type: "text", text: deltaText }]
+      };
+    }
+
+    const textOutput = (options?.format === "yaml")
+      ? (result?.yaml || result?.compactTree || "Empty tree.")
+      : (result?.compactTree || result?.yaml || "Empty tree.");
+    const header = result?.title ? `[Page: "${result.title}" | Interactive Nodes: ${result.interactiveCount || 0} | URL: ${result.url || ""}]\n\n` : "";
+    return {
+      content: [{ type: "text", text: header + textOutput }]
+    };
+  }
+
+  // Mutating action tools: return minimalist message + delta diff if any DOM mutations occurred
+  if (toolName && globalAXTreeTracker.isMutatingTool(toolName)) {
+    const formatted = globalAXTreeTracker.formatActionResultWithDelta(toolName, result, delta);
+    return {
+      content: [{ type: "text", text: formatted }]
     };
   }
 
@@ -222,6 +259,7 @@ async function handleJsonRpcRequest(request) {
           : resolveTemplateVariables(rawArgs);
 
         let executionResult;
+        let postMutationDelta = null;
 
         try {
           if (toolName === "set_preferences") {
@@ -253,15 +291,37 @@ async function handleJsonRpcRequest(request) {
                 }))
               };
             }
+          } else if (toolName === "browser_snapshot") {
+            const filterArg = resolvedArgs.deltaOnly ? "delta" : (resolvedArgs.filter || "interactive");
+            executionResult = await bridge.executeTool("browser_snapshot", {
+              ...resolvedArgs,
+              filter: filterArg
+            });
+            postMutationDelta = globalAXTreeTracker.updatePageState(executionResult);
           } else {
-            // Browser automation tools routed to extension bridge
+            // Browser action tool execution
             executionResult = await bridge.executeTool(toolName, resolvedArgs);
+
+            // If this is a mutating browser tool, evaluate post-mutation delta immediately
+            if (globalAXTreeTracker.isMutatingTool(toolName)) {
+              try {
+                const snap = await bridge.executeTool("browser_snapshot", {
+                  filter: "interactive",
+                  depth: 30
+                });
+                if (snap) {
+                  postMutationDelta = globalAXTreeTracker.updatePageState(snap);
+                }
+              } catch (snapErr) {
+                // Navigation or closed tab, non-fatal
+              }
+            }
           }
 
           return sendResponse({
             jsonrpc: "2.0",
             id,
-            result: formatToolSuccess(executionResult)
+            result: formatToolSuccess(executionResult, toolName, postMutationDelta, resolvedArgs)
           });
         } catch (toolErr) {
           return sendResponse({
@@ -279,6 +339,18 @@ async function handleJsonRpcRequest(request) {
           id,
           result: {
             resources: [
+              {
+                uri: "browser://current-page/interactive-elements",
+                name: "Interactive Elements Flat Matrix",
+                description: "Live, ultra-compact flat list of all interactive elements (@e handles, role, label, value, state) on the active tab.",
+                mimeType: "text/plain"
+              },
+              {
+                uri: "browser://current-page/ax-tree",
+                name: "Current Page Accessibility Tree",
+                description: "Live pruned accessibility tree of the active tab containing @e reference handles, roles, names, and states.",
+                mimeType: "text/plain"
+              },
               {
                 uri: "preference://active",
                 name: "Applicant Preferences",
@@ -321,6 +393,49 @@ async function handleJsonRpcRequest(request) {
       case "resources/read": {
         if (isNotification) return;
         const uri = params?.uri;
+
+        if (uri && (uri.startsWith("browser://current-page") || uri.startsWith("browser://active-tab"))) {
+          try {
+            const isYaml = uri.includes("ax-tree") && !uri.includes("interactive");
+
+            // Check if tracker already has fresh cached tree (< 3000ms old)
+            let resourceText = "";
+            const isFresh = globalAXTreeTracker.lastUpdated && (Date.now() - globalAXTreeTracker.lastUpdated < 3000);
+            if (isFresh && (isYaml ? globalAXTreeTracker.latestYaml : globalAXTreeTracker.latestCompactTree)) {
+              resourceText = isYaml ? globalAXTreeTracker.getAxTreeResource() : globalAXTreeTracker.getInteractiveElementsResource();
+            } else {
+              const snapshotResult = await bridge.executeTool("browser_snapshot", {
+                filter: isYaml ? "all" : "interactive",
+                depth: 30
+              });
+              if (snapshotResult) {
+                globalAXTreeTracker.updatePageState(snapshotResult);
+              }
+              resourceText = isYaml ? globalAXTreeTracker.getAxTreeResource() : globalAXTreeTracker.getInteractiveElementsResource();
+            }
+
+            return sendResponse({
+              jsonrpc: "2.0",
+              id,
+              result: {
+                contents: [
+                  {
+                    uri,
+                    mimeType: "text/plain",
+                    text: resourceText || "Accessibility state unavailable."
+                  }
+                ]
+              }
+            });
+          } catch (resErr) {
+            return sendResponse({
+              jsonrpc: "2.0",
+              id,
+              error: { code: -32000, message: `Failed to read page accessibility tree: ${resErr.message}` }
+            });
+          }
+        }
+
         if (uri === "preference://active") {
           const prefs = getLoadedPreferences();
           return sendResponse({

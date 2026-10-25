@@ -1,7 +1,7 @@
 /**
  * content-scripts/element-map.js
  *
- * Maintains a live map of DOM elements referenced by unique handles (@e1, @e2, ref_1, etc.)
+ * Maintains a live map of DOM elements referenced by unique handles (@e1, e1, ref_1, etc.)
  * using WeakRefs to avoid memory leaks across dynamic single-page applications.
  */
 
@@ -33,6 +33,7 @@
 
   /**
    * Assigns or retrieves a unique reference handle for a DOM node.
+   * Registers @e1, e1, and ref_1 handles for universal compatibility.
    * @param {Element} node
    * @returns {string} e.g. "@e1"
    */
@@ -49,56 +50,65 @@
 
     pruneStaleEntries();
 
-    const refId = `@e${nextElementIndex++}`;
-    node.__autoResumeRefId = refId;
+    const num = nextElementIndex++;
+    const atId = `@e${num}`;
+    const plainId = `e${num}`;
+    const refAlias = `ref_${num}`;
+
+    node.__autoResumeRefId = atId;
     const weakRef = new WeakRef(node);
-    window.__claudeElementMap[refId] = weakRef;
 
-    // Also support "ref_X" alias for cross-compatibility
-    const aliasId = `ref_${refId.slice(2)}`;
-    window.__claudeElementMap[aliasId] = weakRef;
+    window.__claudeElementMap[atId] = weakRef;
+    window.__claudeElementMap[plainId] = weakRef;
+    window.__claudeElementMap[refAlias] = weakRef;
 
-    return refId;
+    return atId;
   };
 
   /**
    * Dereferences an element reference handle.
+   * Supports @e1, e1, ref_1, XPath, ARIA role selector, and CSS selectors.
    * Supports Shadow DOM elements via .isConnected.
-   * @param {string} refId - e.g. "@e12", "ref_12", or standard selector
+   * @param {string} refId - e.g. "@e12", "e12", "ref_12", or standard selector
    * @returns {Element|null}
    */
   window.__getElementByRef = function(refId) {
     if (!refId || typeof refId !== 'string') return null;
 
-    const alt = refId.startsWith('@e') ? `ref_${refId.slice(2)}` : (refId.startsWith('ref_') ? `@e${refId.slice(4)}` : null);
+    const normalized = refId.trim();
 
-    // Direct lookup in element map
-    if (window.__claudeElementMap[refId]) {
-      const el = window.__claudeElementMap[refId].deref();
+    // 1. Direct lookup in element map
+    if (window.__claudeElementMap[normalized]) {
+      const el = window.__claudeElementMap[normalized].deref();
       if (el && el.isConnected) return el;
-      delete window.__claudeElementMap[refId];
-      if (alt) delete window.__claudeElementMap[alt];
+      delete window.__claudeElementMap[normalized];
     }
 
-    // Try alternate format
-    if (alt && window.__claudeElementMap[alt]) {
-      const el = window.__claudeElementMap[alt].deref();
-      if (el && el.isConnected) return el;
-      delete window.__claudeElementMap[alt];
-      delete window.__claudeElementMap[refId];
+    // 2. Prefix variations: e14 <-> @e14 <-> ref_14
+    const numMatch = normalized.match(/^[@]?e(\d+)$/i) || normalized.match(/^ref_(\d+)$/i);
+    if (numMatch) {
+      const num = numMatch[1];
+      const candidates = [`@e${num}`, `e${num}`, `ref_${num}`];
+      for (const key of candidates) {
+        if (window.__claudeElementMap[key]) {
+          const el = window.__claudeElementMap[key].deref();
+          if (el && el.isConnected) return el;
+          delete window.__claudeElementMap[key];
+        }
+      }
     }
 
-    // XPath evaluation
-    if (refId.startsWith('//') || refId.startsWith('xpath=')) {
+    // 3. XPath evaluation
+    if (normalized.startsWith('//') || normalized.startsWith('xpath=')) {
       try {
-        const xp = refId.startsWith('xpath=') ? refId.slice(6) : refId;
+        const xp = normalized.startsWith('xpath=') ? normalized.slice(6) : normalized;
         const res = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
         if (res.singleNodeValue instanceof Element) return res.singleNodeValue;
       } catch (e) {}
     }
 
-    // Semantic ARIA role/name selector: role=button[name="Submit"] or button "Submit"
-    const roleMatch = refId.match(/^role=([a-zA-Z0-9]+)\[name=["']([^"']+)["']\]$/i) || refId.match(/^([a-zA-Z0-9]+)\s+["']([^"']+)["']$/i);
+    // 4. Semantic ARIA role/name selector: role=button[name="Submit"] or button "Submit"
+    const roleMatch = normalized.match(/^role=([a-zA-Z0-9]+)\[name=["']([^"']+)["']\]$/i) || normalized.match(/^([a-zA-Z0-9]+)\s+["']([^"']+)["']$/i);
     if (roleMatch) {
       const targetRole = roleMatch[1].toLowerCase();
       const targetName = roleMatch[2].toLowerCase();
@@ -124,9 +134,9 @@
       }
     }
 
-    // Standard CSS selector fallback
+    // 5. Standard CSS selector fallback
     try {
-      const el = document.querySelector(refId);
+      const el = document.querySelector(normalized);
       if (el) return el;
     } catch (e) {}
 
@@ -155,7 +165,8 @@
       y: Math.round(rect.top + rect.height / 2),
       width: Math.round(rect.width),
       height: Math.round(rect.height),
-      visible: isVisible
+      visible: isVisible,
+      tagName: el.tagName
     };
   };
 })();

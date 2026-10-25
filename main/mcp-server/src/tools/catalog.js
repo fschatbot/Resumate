@@ -54,18 +54,27 @@ export const TOOL_CATALOG = [
 	// --- Observation & Inspection ---
 	{
 		name: "browser_snapshot",
-		description: "Extracts an accessibility tree representation of the active page serialized as YAML with unique element reference handles (@e1, @e2, ref_1, etc.).",
+		description: "Extracts a pruned accessibility tree or mutation delta of the active page with element reference handles (@e1, @e2, etc.). Supports compact flat matrix, hierarchical YAML, and delta-only updates.",
 		inputSchema: {
 			type: "object",
 			properties: {
 				filter: {
 					type: "string",
-					enum: ["interactive", "all"],
-					description: "Filter level: 'interactive' for buttons, links, and inputs; 'all' for full document structure. Default: 'all'.",
+					enum: ["interactive", "all", "delta"],
+					description: "Filter level: 'interactive' for actionable controls (default); 'all' for full document structure; 'delta' for only mutated elements since last interaction.",
+				},
+				deltaOnly: {
+					type: "boolean",
+					description: "If true, returns only newly added, removed, or changed elements since the last action/snapshot.",
+				},
+				format: {
+					type: "string",
+					enum: ["compact", "yaml"],
+					description: "Output format: 'compact' (default) returns a token-dense flat matrix (@e... -> role \"name\"); 'yaml' returns full hierarchical tree.",
 				},
 				depth: {
 					type: "integer",
-					description: "Max traversal depth. Default: 15.",
+					description: "Max traversal depth. Default: 30.",
 				},
 				tabId: { type: "integer", description: "Target tab ID." },
 			},
@@ -73,18 +82,27 @@ export const TOOL_CATALOG = [
 	},
 	{
 		name: "read_page",
-		description: "Alias for browser_snapshot. Extracts an accessibility tree representation of the active page serialized as YAML.",
+		description: "Alias for browser_snapshot. Extracts a pruned accessibility tree or mutation delta of the active page.",
 		inputSchema: {
 			type: "object",
 			properties: {
 				filter: {
 					type: "string",
-					enum: ["interactive", "all"],
-					description: "Filter level: 'interactive' for buttons, links, and inputs; 'all' for full document structure. Default: 'all'.",
+					enum: ["interactive", "all", "delta"],
+					description: "Filter level: 'interactive', 'all', or 'delta'.",
+				},
+				deltaOnly: {
+					type: "boolean",
+					description: "If true, returns only changed elements since last interaction.",
+				},
+				format: {
+					type: "string",
+					enum: ["compact", "yaml"],
+					description: "Output format: 'compact' or 'yaml'.",
 				},
 				depth: {
 					type: "integer",
-					description: "Max traversal depth. Default: 15.",
+					description: "Max traversal depth. Default: 30.",
 				},
 				tabId: { type: "integer", description: "Target tab ID." },
 			},

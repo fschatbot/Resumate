@@ -10,6 +10,7 @@ import {
   handleReadFile
 } from '../src/tools/schema-tools.js';
 import { resolveTemplateVariables } from '../src/utils/template-resolver.js';
+import { AXTreeTracker } from '../src/utils/ax-tree-tracker.js';
 
 console.log('Running AutoResume MCP Server tests...');
 
@@ -119,5 +120,69 @@ const readMdRes = handleReadFile({ name: "Resume.md" });
 assert.equal(readMdRes.success, true);
 assert.equal(readMdRes.text, "# Jane Doe\nSoftware Engineer");
 console.log('✓ handleReadFile (Resume.md) passed.');
+
+// 9. Test AXTreeTracker & Delta Diff Engine
+const tracker = new AXTreeTracker();
+
+// Initial snapshot establishes baseline
+const initialSnapshot = {
+  title: "Job Application",
+  url: "https://careers.example.com/apply",
+  interactiveCount: 3,
+  totalNodes: 10,
+  compactTree: [
+    '@e10 -> textbox "First Name" [required]',
+    '@e11 -> textbox "Last Name" [required]',
+    '@e14 -> combobox "Shipping Method" [required, collapsed]'
+  ].join('\n'),
+  yaml: "- RootWebArea\n  - combobox id: @e14"
+};
+
+const initialDelta = tracker.updatePageState(initialSnapshot);
+assert.equal(initialDelta.hasChanges, true);
+assert.equal(initialDelta.addedCount, 3);
+console.log('✓ AXTreeTracker initial baseline ingestion passed.');
+
+// Mutated snapshot: @e14 value changed to "Express" and new options rendered
+const mutatedSnapshot = {
+  title: "Job Application",
+  url: "https://careers.example.com/apply",
+  interactiveCount: 5,
+  totalNodes: 12,
+  compactTree: [
+    '@e10 -> textbox "First Name" [required]',
+    '@e11 -> textbox "Last Name" [required]',
+    '@e14 -> combobox "Shipping Method": "Express" [required, expanded]',
+    '@e15 -> text "Calculated Total: $45.00"',
+    '@e16 -> button "Continue to Payment"'
+  ].join('\n')
+};
+
+const secondDelta = tracker.updatePageState(mutatedSnapshot);
+assert.equal(secondDelta.hasChanges, true, 'Mutations should be detected');
+assert.equal(secondDelta.addedCount, 2, 'Two new elements added (@e15, @e16)');
+assert.ok(secondDelta.deltaText.includes('Shipping Method'), 'Delta text should mention modified element');
+assert.ok(secondDelta.deltaText.includes('@e15'), 'Delta text should include added element');
+console.log('✓ AXTreeTracker delta diff detection (+added, ~changed) passed.');
+
+// Test minimal response formatting with delta
+const formattedAction = tracker.formatActionResultWithDelta('browser_click', { success: true, message: 'Clicked @e14' }, secondDelta);
+assert.ok(formattedAction.startsWith('Clicked @e14'));
+assert.ok(formattedAction.includes('[DOM Mutation Detected]'));
+assert.ok(formattedAction.includes('Changed Elements:'));
+console.log('✓ Minimal tool result formatting with delta passed.');
+
+// Test clean status when no DOM mutations occur
+const unmutatedDelta = tracker.updatePageState(mutatedSnapshot);
+assert.equal(unmutatedDelta.hasChanges, false);
+const cleanAction = tracker.formatActionResultWithDelta('browser_click', { success: true, message: 'Clicked @e14' }, unmutatedDelta);
+assert.equal(cleanAction, 'Clicked @e14 No DOM mutations detected.');
+console.log('✓ Minimal tool result without DOM mutations passed.');
+
+// Test MCP Resource text generation
+const resourceText = tracker.getInteractiveElementsResource();
+assert.ok(resourceText.includes('Job Application'));
+assert.ok(resourceText.includes('@e10 -> textbox'));
+console.log('✓ Interactive elements resource formatting passed.');
 
 console.log('\nAll AutoResume MCP tests passed successfully!');

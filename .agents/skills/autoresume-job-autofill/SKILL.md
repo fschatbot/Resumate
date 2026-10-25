@@ -10,9 +10,10 @@ description: Autonomous job application form autofill agent using the AutoResume
 > [!IMPORTANT]
 > **SPEED & EFFICIENCY MANDATE**:
 > - Complete the entire application form **as fast as physically possible**. You are penalized for every unnecessary tool round-trip.
-> - **Batch calls (`browser_batch`) count as only ONE tool call.** Pack all deterministic form interactions into a single comprehensive batch rather than individual round-trips.
+> - **Action Tools Provide Automatic DOM Mutation Deltas**: When you call action tools (`browser_click`, `form_input`, `browser_type`, `browser_select_option`, `browser_batch`), the response returns a minimalist confirmation plus any live `[DOM Mutation Detected]` diff (`+ added`, `- removed`, `~ changed`).
+> - **No Redundant Snapshots**: If an interaction reveals target elements in its mutation delta (e.g., clicking a dropdown reveals `+ @e45: option "United States"`), **do NOT call `browser_snapshot` again**. Immediately use `@e45` in your next action or batch!
+> - **Batch calls (`browser_batch`) count as only ONE tool call.** Pack all deterministic form interactions into a single comprehensive batch.
 > - **DO NOT inspect or read `~/.gemini/antigravity-cli/mcp/autoresume/*.json` on disk.** All tool definitions, parameter schemas, and examples are provided directly in the **Tool Cheat Sheet** below.
-> - **Cap discovery to a single observation pass.** Do not conduct piecemeal element verification tests, trial clicks, or fiber state probing before the batch. Once the field mapping is known, fire the mega-batch immediately.
 > - **Zero-Hallucination Policy**: Never claim a demographic disclosure (Gender, Race, Veteran, Disability) is filled unless verified. In modern ATS portals, styled checkboxes/radios MUST be selected by clicking their `<label for="...">` or clickable wrapper.
 > - **Never Submit**: Do not click the final "Submit Application" button.
 
@@ -29,14 +30,14 @@ All AutoResume MCP tools are documented below. Use these exact parameters:
 | `validate_preferences_schema` | `{ section?: string }` | Validates loaded preferences against schema: `{ valid: boolean, errors: string[] }`. |
 | `tabs_context` | `{}` | Lists all tabs: `[ { id, title, url, active, groupId } ]`. |
 | `tabs_context_mcp` | `{ createIfEmpty?: boolean }` | Lists tabs confined to the `AutoResume (MCP)` group. |
-| `browser_snapshot` | `{ filter?: "interactive" \| "all", depth?: number }` | Returns accessibility tree with unique `@e1`, `@e2` element references. *(Recommended: `filter: "interactive", depth: 30`)*. |
+| `browser_snapshot` | `{ filter?: "interactive" \| "all" \| "delta", deltaOnly?: boolean, format?: "compact" \| "yaml", depth?: number }` | Returns compact flat matrix or delta diff. *(Recommended: `filter: "interactive", depth: 30`)*. |
 | `browser_screenshot` | `{}` | Returns `{ screenshotBase64: string }` visual view of the layout. |
-| `form_input` | `{ ref: string, value: any }` | **Primary text/select/checkbox tool**. Natively sets values with React/Vue event dispatch. Supports `${preferences.*}` templates. Example: `{ "ref": "@e12", "value": "${preferences.general.email}" }`. |
-| `browser_click` | `{ element: string, button?: "left", clickCount?: number }` | Clicks target `@e...` or CSS selector (e.g. `label[for="..."]`). Snaps into view instantly. |
+| `form_input` | `{ ref: string, value: any }` | **Primary text/select/checkbox tool**. Natively sets values with React/Vue event dispatch. Supports `${preferences.*}` templates. Example: `{ "ref": "@e12", "value": "${preferences.general.email}" }`. Returns mutation delta if UI changes. |
+| `browser_click` | `{ element: string, button?: "left", clickCount?: number }` | Clicks target `@e...` or CSS selector (e.g. `label[for="..."]`). Snaps into view instantly. Returns mutation delta if UI changes. |
 | `browser_hover` | `{ element: string, durationMs?: number }` | Hovers element (maintains hover >= 100ms). |
 | `browser_type` | `{ element: string, text: string, delay?: number }` | Simulates keystrokes for autocomplete / search-as-you-type inputs. |
 | `browser_wait` | `{ time: number }` | Pauses for `time` seconds (e.g. `{ "time": 0.1 }`). |
-| `browser_batch` | `{ actions: Array<{ tool: string, params: Object }>, stopOnError?: boolean }` | **Compound transaction execution**. Executes dozens of sub-steps in one round-trip. Counts as 1 tool call. |
+| `browser_batch` | `{ actions: Array<{ tool: string, params: Object }>, stopOnError?: boolean }` | **Compound transaction execution**. Executes dozens of sub-steps in one round-trip. Counts as 1 tool call. Returns aggregate mutation delta. |
 | `file_upload` | `{ fileName?: string, files?: Array }` | Injects resume/attachments from storage. Example: `{ "fileName": "Resume.pdf" }`. |
 | `get_tool_definitions` | `{ toolName?: string }` | Returns parameter schemas for any tool on demand. |
 
@@ -47,9 +48,9 @@ All AutoResume MCP tools are documented below. Use these exact parameters:
 ```mermaid
 flowchart TD
     A["Phase 0: get_preferences<br/>(Reuse existing or parse Resume.md)"] --> B["Phase 1: tabs_context<br/>(Verify confinement & ATS Host)"]
-    B --> C["Phase 2: Dual Observation<br/>(1 Snapshot + 1 Screenshot)"]
+    B --> C["Phase 2: Dual Observation<br/>(1 Resource/Snapshot + 1 Screenshot)"]
     C --> D["Phase 3: Dynamic Behavior Probe<br/>(1 Batch to click combobox triggers)"]
-    D --> E["Single Reconnaissance Snapshot<br/>(All option @e handles now exposed)"]
+    D --> E["Automatic Mutation Delta<br/>(All option @e handles returned directly in batch output!)"]
     E --> F["Phase 4: MEGA-BATCH Autofill<br/>(Stage 1: form_input + Stage 2: Option/Label clicks)"]
     F --> G["Phase 5: file_upload & Multi-Step Check"]
     G --> H["Phase 6: Verification Snapshot & Report"]
@@ -71,8 +72,18 @@ flowchart TD
    - **Workday (`myworkdayjobs.com`)**: Wizard multi-step, button comboboxes, label-wrapped radios.
 
 ### Phase 2: Dual Observation Pass
-1. Call `browser_snapshot({ "depth": 30, "filter": "interactive" })` to generate semantic element references (`@e1`, `@e2`, etc.).
-   *(If large/truncated, read the output file in `.system_generated/steps/<id>/output.txt`).*
+1. **Observation Method**:
+   - **Preferred Resource Path**: Read the resource `browser://current-page/interactive-elements` (or `browser://current-page/ax-tree`) via MCP resources for an ultra-compact flat matrix:
+     ```text
+     @e10 -> textbox "First Name" [required]
+     @e11 -> textbox "Last Name" [required]
+     @e12 -> textbox "Email": "user@example.com" [required]
+     @e13 -> combobox "Country Code": "+1" [required, collapsed]
+     @e14 -> textbox "Phone Number" [required]
+     @e15 -> combobox "Country" [required, collapsed]
+     @e16 -> checkbox "Man" [checked]
+     ```
+   - **Tool Path**: Alternatively, call `browser_snapshot({ "depth": 30, "filter": "interactive" })`. The tool output returns clean, compact flat text.
 2. Call `browser_screenshot({})` once to visually verify required fields (`*`) and layout.
 3. Categorize fields into:
    - **Static Inputs**: Text, email, phone, city, URLs $\rightarrow$ `form_input`.
@@ -84,8 +95,9 @@ If comboboxes hide option listboxes until clicked:
 1. Construct and execute a single `browser_batch`:
    - Click suspicious combobox triggers (`browser_click`) to expand listboxes/popovers into the DOM.
    - Settle wait: `browser_wait({ time: 0.1 })`.
-2. Follow immediately with a single `browser_snapshot({ "filter": "interactive" })`.
-3. **Outcome**: All dropdown option elements (`@e...`) and text values across the entire form are now exposed at once.
+2. **Immediate Delta Feedback**: The `browser_batch` output **automatically returns the mutation delta** containing all newly revealed option handles (`+ @e45: option "United States"`).
+   - **You do NOT need to call `browser_snapshot` again**!
+3. If you ever need to inspect deltas explicitly without re-reading the page, call `browser_snapshot({ "deltaOnly": true })`.
 
 ### Phase 4: MEGA-BATCH Autofill (Entire Form in 1 Go)
 Construct and execute **ONE COMPREHENSIVE `browser_batch`** filling 90–100% of the form:

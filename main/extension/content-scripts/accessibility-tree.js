@@ -1,14 +1,23 @@
 /**
  * content-scripts/accessibility-tree.js
  *
- * Generates semantic Accessibility Tree snapshots serialized as YAML for LLM grounding.
- * Combines ARIA role computation, label resolution, form state detection, select value inspection,
- * shadow DOM traversal, and handle assignment.
+ * Autonomous, high-performance Accessibility Tree engine with:
+ * 1. Deep pruning of non-interactive layout noise into clean token-dense structures.
+ * 2. Stable Element Reference Tokens (@e1, e1, ref_1).
+ * 3. Continuous DOM mutation tracking via MutationObserver.
+ * 4. Stateful delta engine computing granular diffs (+added, -removed, ~changed).
+ * 5. Compact flat matrix and hierarchical YAML output formats.
  */
 
 (() => {
   if (window.__accessibilityTreeInitialized) return;
   window.__accessibilityTreeInitialized = true;
+
+  // Track raw DOM mutations continuously
+  window.__domMutationCount = 0;
+  window.__lastMutationTimestamp = 0;
+  window.__domDirty = true;
+  window.__lastAxNodeMap = window.__lastAxNodeMap || new Map();
 
   const INTERACTIVE_ROLES = new Set([
     'button', 'link', 'textbox', 'combobox', 'checkbox', 'radio',
@@ -20,9 +29,31 @@
     'SCRIPT', 'STYLE', 'NOSCRIPT', 'SVG', 'PATH', 'META', 'LINK', 'TEMPLATE'
   ]);
 
-  function sanitizeYamlString(str) {
+  // Set up continuous DOM MutationObserver
+  try {
+    const observer = new MutationObserver((mutations) => {
+      window.__domMutationCount += mutations.length;
+      window.__lastMutationTimestamp = Date.now();
+      window.__domDirty = true;
+    });
+
+    observer.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: [
+        'value', 'checked', 'disabled', 'aria-expanded', 'aria-checked',
+        'aria-disabled', 'aria-hidden', 'aria-label', 'placeholder',
+        'class', 'style', 'hidden'
+      ]
+    });
+  } catch (e) {
+    console.warn('[AutoResume] MutationObserver init warning:', e);
+  }
+
+  function sanitizeString(str) {
     if (!str) return '';
-    return str.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\r\n\t]+/g, ' ').trim();
+    return String(str).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\r\n\t]+/g, ' ').trim();
   }
 
   /**
@@ -32,7 +63,7 @@
    */
   function computeRole(el) {
     const explicitRole = el.getAttribute('role');
-    if (explicitRole) return explicitRole.toLowerCase();
+    if (explicitRole) return explicitRole.toLowerCase().trim();
 
     const tag = el.tagName.toUpperCase();
     if (tag === 'A' && el.hasAttribute('href')) return 'link';
@@ -57,6 +88,8 @@
     if (tag === 'FORM') return 'form';
     if (tag === 'UL' || tag === 'OL') return 'list';
     if (tag === 'LI') return 'listitem';
+    if (tag === 'OPTION') return 'option';
+    if (tag === 'DIALOG') return 'dialog';
 
     if (el.isContentEditable) return 'textbox';
 
@@ -109,14 +142,45 @@
     const alt = el.getAttribute('alt');
     if (alt && alt.trim()) return alt.trim();
 
-    // 5. Direct text content for buttons, links, headings
+    // 5. Direct text content for interactive buttons, links, headings, options
     const tag = el.tagName.toUpperCase();
-    if (['BUTTON', 'A', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6'].includes(tag) || el.getAttribute('role') === 'button') {
+    if (['BUTTON', 'A', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'OPTION', 'SPAN'].includes(tag) || el.getAttribute('role') === 'button') {
       const text = el.innerText || el.textContent || '';
       return text.replace(/\s+/g, ' ').trim();
     }
 
     return '';
+  }
+
+  /**
+   * Resolves current value for inputs, selects, and textareas.
+   * @param {Element} el
+   * @param {string} role
+   * @returns {string|null}
+   */
+  function computeElementValue(el, role) {
+    const tag = el.tagName.toUpperCase();
+    if (tag === 'INPUT' || tag === 'TEXTAREA') {
+      const type = (el.getAttribute('type') || '').toLowerCase();
+      if (type === 'password') return '[password]';
+      if (!['submit', 'button', 'reset', 'checkbox', 'radio'].includes(type)) {
+        return el.value !== undefined ? el.value : null;
+      }
+    }
+
+    if (tag === 'SELECT') {
+      const selectedOption = el.options && el.selectedIndex >= 0 ? el.options[el.selectedIndex] : null;
+      if (selectedOption) {
+        return selectedOption.text || selectedOption.value || null;
+      }
+      return el.value || null;
+    }
+
+    if (el.getAttribute('role') === 'combobox' && el.getAttribute('aria-valuenow')) {
+      return el.getAttribute('aria-valuenow');
+    }
+
+    return null;
   }
 
   /**
@@ -131,11 +195,11 @@
     if (document.activeElement === el) states.push('focused');
     if (el.disabled || el.getAttribute('aria-disabled') === 'true') states.push('disabled');
     if (el.required || el.getAttribute('aria-required') === 'true') states.push('required');
+    if (el.readOnly || el.getAttribute('aria-readonly') === 'true') states.push('readonly');
 
     if (role === 'checkbox' || role === 'radio') {
-      if (el.checked || el.getAttribute('aria-checked') === 'true') {
-        states.push('checked');
-      }
+      const isChecked = el.checked || el.getAttribute('aria-checked') === 'true';
+      states.push(isChecked ? 'checked' : 'unchecked');
     }
 
     if (el.hasAttribute('aria-expanded')) {
@@ -146,48 +210,133 @@
       states.push(`level: ${el.tagName.charAt(1)}`);
     }
 
-    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
-      const type = (el.getAttribute('type') || '').toLowerCase();
-      if (type === 'password') {
-        states.push('type: password');
-      } else if (el.value && !['submit', 'button', 'checkbox', 'radio'].includes(type)) {
-        const valPreview = el.value.length > 30 ? el.value.slice(0, 30) + '...' : el.value;
-        states.push(`value: "${sanitizeYamlString(valPreview)}"`);
-      }
-    }
-
-    if (el.tagName === 'SELECT') {
-      const selectedOption = el.options && el.selectedIndex >= 0 ? el.options[el.selectedIndex] : null;
-      const valText = selectedOption ? (selectedOption.text || selectedOption.value) : el.value;
-      if (valText) {
-        states.push(`value: "${sanitizeYamlString(valText)}"`);
-      }
-    }
-
     return states;
   }
 
   /**
-   * Generates the hierarchical YAML accessibility tree.
-   * @param {string} [filter="all"] - "interactive" or "all"
-   * @param {number} [maxDepth=15]
-   * @param {number} [maxChars=50000]
-   * @param {string} [rootRefId]
-   * @returns {{ yaml: string, title: string, url: string, totalNodes: number, interactiveCount: number }}
+   * Formats a single element into the compact flat matrix string:
+   * e.g. "@e14 -> combobox "Shipping Method": "Express" [expanded, required]"
    */
-  window.__generateAccessibilityTree = function(filter = 'all', maxDepth = 15, maxChars = 50000, rootRefId = null) {
+  function formatCompactLine(ref, role, name, value, states) {
+    const nameStr = name ? `"${sanitizeString(name)}"` : '""';
+    const valStr = (value !== null && value !== undefined && value !== '') ? `: "${sanitizeString(value)}"` : '';
+    const stateStr = states && states.length > 0 ? ` [${states.join(', ')}]` : '';
+    return `${ref} -> ${role} ${nameStr}${valStr}${stateStr}`;
+  }
+
+  /**
+   * Generates a stable signature string for diffing element state mutations.
+   */
+  function computeNodeSignature(role, name, value, states, isVisible) {
+    const statesStr = states ? [...states].sort().join(',') : '';
+    return `${role}|${name || ''}|${value || ''}|${statesStr}|${Boolean(isVisible)}`;
+  }
+
+  /**
+   * Evaluates the accessibility tree delta comparing current nodes against last known state.
+   * @param {Map<string, object>} currentMap
+   * @param {Map<string, object>} previousMap
+   * @returns {{ hasChanges: boolean, added: object[], removed: object[], changed: object[], deltaText: string }}
+   */
+  function computeDelta(currentMap, previousMap) {
+    const added = [];
+    const removed = [];
+    const changed = [];
+    const deltaLines = [];
+
+    // Check for added or modified elements
+    for (const [ref, curr] of currentMap.entries()) {
+      if (!previousMap.has(ref)) {
+        added.push(curr);
+        deltaLines.push(`+ ${curr.formatted}`);
+      } else {
+        const prev = previousMap.get(ref);
+        if (curr.signature !== prev.signature) {
+          const changeReasons = [];
+          if (curr.value !== prev.value) {
+            changeReasons.push(`changed value to "${sanitizeString(curr.value || '')}"`);
+          }
+          if (curr.name !== prev.name) {
+            changeReasons.push(`label changed to "${sanitizeString(curr.name)}"`);
+          }
+          const prevStatesSet = new Set(prev.states || []);
+          const currStatesSet = new Set(curr.states || []);
+          for (const s of (curr.states || [])) {
+            if (!prevStatesSet.has(s)) changeReasons.push(s);
+          }
+          for (const s of (prev.states || [])) {
+            if (!currStatesSet.has(s)) changeReasons.push(`not ${s}`);
+          }
+          if (curr.isVisible !== prev.isVisible) {
+            changeReasons.push(curr.isVisible ? 'became visible' : 'became hidden');
+          }
+
+          const desc = changeReasons.length > 0 ? changeReasons.join(', ') : 'modified';
+          changed.push({ ref, current: curr, previous: prev, reason: desc });
+          deltaLines.push(`~ ${ref}: ${curr.role} "${sanitizeString(curr.name)}" ${desc}`);
+        }
+      }
+    }
+
+    // Check for removed elements
+    for (const [ref, prev] of previousMap.entries()) {
+      if (!currentMap.has(ref)) {
+        removed.push(prev);
+        deltaLines.push(`- ${prev.ref}: ${prev.role} "${sanitizeString(prev.name)}"`);
+      }
+    }
+
+    const hasChanges = (added.length > 0 || removed.length > 0 || changed.length > 0);
+
+    let deltaText = "";
+    if (hasChanges) {
+      deltaText = [
+        "[DOM Mutation Detected]",
+        "Changed Elements:",
+        ...deltaLines
+      ].join('\n');
+    } else {
+      deltaText = "[No DOM mutations detected]";
+    }
+
+    return {
+      hasChanges,
+      addedCount: added.length,
+      removedCount: removed.length,
+      changedCount: changed.length,
+      added,
+      removed,
+      changed,
+      deltaText
+    };
+  }
+
+  /**
+   * Generates the pruned accessibility tree, flat matrix, and delta against previous baseline.
+   * @param {string} [filter="interactive"] - "interactive", "all", or "delta"
+   * @param {number} [maxDepth=30]
+   * @param {number} [maxChars=50000]
+   * @param {string} [rootRefId=null]
+   * @returns {object}
+   */
+  window.__generateAccessibilityTree = function(filter = 'interactive', maxDepth = 30, maxChars = 50000, rootRefId = null) {
     let startNode = document.body || document.documentElement;
     if (rootRefId && window.__getElementByRef) {
       const customRoot = window.__getElementByRef(rootRefId);
       if (customRoot) startNode = customRoot;
     }
 
+    const isDeltaOnly = (filter === 'delta');
+    const actualFilter = isDeltaOnly ? 'interactive' : (filter || 'interactive');
+
     const lines = [];
+    const matrixLines = [];
+    const currentNodeMap = new Map();
     let totalNodes = 0;
     let interactiveCount = 0;
 
     // Root line
-    const safeTitle = sanitizeYamlString(document.title);
+    const safeTitle = sanitizeString(document.title);
     lines.push(`- RootWebArea "${safeTitle}" [url: ${window.location.href}]`);
 
     function traverse(node, depth) {
@@ -202,37 +351,55 @@
       const isInteractive = INTERACTIVE_ROLES.has(role) || node.hasAttribute('tabindex') || node.onclick;
       const accessibleName = computeAccessibleName(node);
       const states = collectStates(node, role);
+      const value = computeElementValue(node, role);
 
       let refHandle = null;
       if (isInteractive && window.__registerElementRef) {
         refHandle = window.__registerElementRef(node);
-        states.unshift(`id: ${refHandle}`);
         interactiveCount++;
+
+        const compactLine = formatCompactLine(refHandle, role, accessibleName, value, states);
+        matrixLines.push(compactLine);
+
+        // Index in current node map for delta tracking
+        const signature = computeNodeSignature(role, accessibleName, value, states, true);
+        currentNodeMap.set(refHandle, {
+          ref: refHandle,
+          role,
+          name: accessibleName,
+          value,
+          states,
+          isVisible: true,
+          formatted: compactLine,
+          signature
+        });
       }
 
-      const shouldInclude = (filter === 'all') || isInteractive || accessibleName.length > 0;
+      const shouldInclude = (actualFilter === 'all') || isInteractive || accessibleName.length > 0;
 
       if (shouldInclude && (role !== 'generic' || accessibleName || refHandle)) {
         totalNodes++;
         const indent = '  '.repeat(depth);
-        const nameStr = accessibleName ? ` "${sanitizeYamlString(accessibleName)}"` : '';
+        const nameStr = accessibleName ? ` "${sanitizeString(accessibleName)}"` : '';
+        const valStr = value ? ` value: "${sanitizeString(value)}"` : '';
+        const idStr = refHandle ? ` id: ${refHandle}` : '';
         const stateStr = states.length > 0 ? ` [${states.join(', ')}]` : '';
-        lines.push(`${indent}- ${role}${nameStr}${stateStr}`);
+        lines.push(`${indent}- ${role}${idStr}${nameStr}${valStr}${stateStr}`);
       }
 
-      // Traverse light DOM children
+      // Light DOM traversal
       for (const child of node.children) {
         traverse(child, depth + 1);
       }
 
-      // Traverse Shadow DOM if present (Workday / Web Components)
+      // Shadow DOM traversal
       if (node.shadowRoot) {
         for (const child of node.shadowRoot.children) {
           traverse(child, depth + 1);
         }
       }
 
-      // Traverse assigned nodes for <slot> elements
+      // Slot elements traversal
       if (node.tagName === 'SLOT' && typeof node.assignedNodes === 'function') {
         const assigned = node.assignedNodes().filter(n => n instanceof Element);
         for (const child of assigned) {
@@ -245,17 +412,47 @@
       traverse(startNode, 1);
     }
 
-    let output = lines.join('\n');
-    if (output.length > maxChars) {
-      output = output.slice(0, maxChars) + '\n... [TRUNCATED - Output exceeded 50,000 characters]';
+    // Compute delta diff against previous baseline
+    const delta = computeDelta(currentNodeMap, window.__lastAxNodeMap);
+
+    // Update baseline map
+    window.__lastAxNodeMap = currentNodeMap;
+    window.__domDirty = false;
+
+    let outputYaml = lines.join('\n');
+    if (outputYaml.length > maxChars) {
+      outputYaml = outputYaml.slice(0, maxChars) + '\n... [TRUNCATED - Output exceeded character limit]';
     }
 
+    const compactOutput = matrixLines.join('\n');
+
     return {
-      yaml: output,
+      yaml: outputYaml,
+      compactTree: compactOutput,
       title: document.title,
       url: window.location.href,
       totalNodes,
-      interactiveCount
+      interactiveCount,
+      domMutationCount: window.__domMutationCount,
+      isDeltaOnly,
+      delta
     };
+  };
+
+  /**
+   * Direct getter for the delta since the last snapshot.
+   */
+  window.__getAccessibilityDelta = function(filter = 'interactive') {
+    const full = window.__generateAccessibilityTree(filter);
+    return full.delta;
+  };
+
+  /**
+   * Resets the baseline state so that subsequent calls treat the page as fresh.
+   */
+  window.__resetAccessibilityBaseline = function() {
+    window.__lastAxNodeMap.clear();
+    window.__domDirty = true;
+    return { success: true, message: 'Accessibility baseline reset.' };
   };
 })();
