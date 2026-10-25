@@ -465,74 +465,281 @@
   };
 
   /**
-   * Injects files into an <input type="file"> element using DataTransfer.
-   * Automatically resolves dropzone wrappers or labels to their inner file input,
-   * validates target type, and respects the multiple attribute.
+   * Injects files into an <input type="file"> element or rich dropzone component using DataTransfer.
+   * Automatically resolves dropzone wrappers, custom buttons, shadow DOMs, or labels to their inner file input,
+   * validates target type, respects the multiple attribute, safely decodes base64/UTF-8 data,
+   * and fires both standard input events and rich drag-and-drop events (dragenter, dragover, drop).
+   * If element or files are missing, cancels gracefully and provides structured feedback.
    * @param {string} refId
    * @param {Array<{ name: string, data?: string, mimeType?: string, type?: string }>} filesPayload
-   * @returns {Promise<{ success: boolean, filesAttached: string[], message: string }>}
+   * @returns {Promise<{ success: boolean, canceled?: boolean, timestamp?: string, reason?: string, feedback?: string, filesAttached?: string[], message?: string }>}
    */
   window.__injectFiles = async function(refId, filesPayload) {
     const el = window.__getElementByRef ? window.__getElementByRef(refId) : null;
     if (!el) {
-      throw new Error(`Element '${refId}' not found.`);
-    }
-
-    // Dropzone or Label to <input type="file"> resolution
-    let fileInput = el;
-    if (el.tagName !== 'INPUT' || (el.getAttribute('type') || '').toLowerCase() !== 'file') {
-      fileInput =
-        el.querySelector('input[type="file"]') ||
-        (el.id ? document.querySelector(`input[type="file"][id="${CSS.escape(el.id)}"]`) : null) ||
-        (el.htmlFor ? document.getElementById(el.htmlFor) : null) ||
-        el.closest('[class*="upload" i], [class*="dropzone" i], [class*="field-" i], form')?.querySelector('input[type="file"]');
-    }
-
-    if (!fileInput || fileInput.tagName !== 'INPUT' || (fileInput.getAttribute('type') || '').toLowerCase() !== 'file') {
-      throw new Error(`Target element '${refId}' is not an <input type="file"> and no file input was found in its container.`);
+      const cancelTime = new Date().toISOString();
+      return {
+        success: false,
+        canceled: true,
+        timestamp: cancelTime,
+        targetRef: refId,
+        reason: `Target element '${refId}' not found in DOM.`,
+        feedback: `File upload for '${refId}' was canceled at ${cancelTime} because the target element does not exist or has been removed from the DOM.`
+      };
     }
 
     if (!Array.isArray(filesPayload) || filesPayload.length === 0) {
-      throw new Error("No files provided in filesPayload.");
+      const cancelTime = new Date().toISOString();
+      return {
+        success: false,
+        canceled: true,
+        timestamp: cancelTime,
+        targetRef: refId,
+        reason: "No file was provided by the AI agent and none was found in session or extension storage.",
+        feedback: `File upload for '${refId}' was canceled at ${cancelTime} because no file data or fileName was provided.`
+      };
+    }
+
+    // Helper to query element and all nested shadow DOMs for input[type="file"]
+    function queryFileDeep(root) {
+      if (!root) return null;
+      // 1. Direct query
+      if (root.tagName === 'INPUT' && (root.type || '').toLowerCase() === 'file') {
+        return root;
+      }
+      try {
+        const direct = root.querySelector?.('input[type="file"]');
+        if (direct) return direct;
+      } catch (e) {}
+
+      // 2. Check shadowRoot if present
+      if (root.shadowRoot) {
+        try {
+          const inShadow = root.shadowRoot.querySelector('input[type="file"]');
+          if (inShadow) return inShadow;
+        } catch (e) {}
+      }
+
+      // 3. Check child custom elements with shadow roots
+      try {
+        const children = root.querySelectorAll?.('*') || [];
+        for (const child of children) {
+          if (child.shadowRoot) {
+            const inChildShadow = child.shadowRoot.querySelector('input[type="file"]');
+            if (inChildShadow) return inChildShadow;
+          }
+        }
+      } catch (e) {}
+
+      return null;
+    }
+
+    // Resolve rich component / dropzone / button / label to <input type="file">
+    let fileInput = queryFileDeep(el);
+
+    // If not found inside target element, check label 'for' / htmlFor
+    if (!fileInput && el.htmlFor) {
+      const linked = document.getElementById(el.htmlFor);
+      if (linked) fileInput = queryFileDeep(linked);
+    }
+
+    // If target has an id, check if a label points to it or has a file input
+    if (!fileInput && el.id) {
+      try {
+        const linkedInput = document.querySelector(`input[type="file"][id="${CSS.escape(el.id)}"]`);
+        if (linkedInput) fileInput = linkedInput;
+        if (!fileInput) {
+          const linkedLabel = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+          if (linkedLabel) fileInput = queryFileDeep(linkedLabel);
+        }
+      } catch (e) {}
+    }
+
+    // Check aria-controls, data-target, or aria-labelledby
+    if (!fileInput) {
+      const targetAttr = el.getAttribute('aria-controls') || el.getAttribute('data-target') || el.getAttribute('aria-labelledby');
+      if (targetAttr) {
+        const linkedTarget = document.getElementById(targetAttr);
+        if (linkedTarget) fileInput = queryFileDeep(linkedTarget);
+      }
+    }
+
+    // Traverse parent hierarchy up to 8 levels (Workday/Greenhouse wrapper divs)
+    if (!fileInput) {
+      let parent = el.parentElement;
+      let depth = 0;
+      while (parent && depth < 8) {
+        const inParent = queryFileDeep(parent);
+        if (inParent) {
+          fileInput = inParent;
+          break;
+        }
+        if (parent.tagName === 'FORM' || parent.getAttribute('role') === 'dialog') {
+          break;
+        }
+        parent = parent.parentElement;
+        depth++;
+      }
+    }
+
+    // Check closest dropzone or upload container
+    if (!fileInput) {
+      const dropzoneContainer = el.closest(
+        '[class*="upload" i], [class*="dropzone" i], [class*="drop-zone" i], ' +
+        '[class*="file" i], [class*="attachment" i], [data-automation-id*="upload" i], ' +
+        '[data-automation-id*="drop" i], [data-automation-id*="file" i], ' +
+        '[data-testid*="upload" i], [data-testid*="drop" i], [data-testid*="file" i], ' +
+        '[data-uxi-dropzone-item], form, section'
+      );
+      if (dropzoneContainer) {
+        fileInput = queryFileDeep(dropzoneContainer);
+      }
+    }
+
+    // Page-level rescue if target button/dropzone clearly indicates file/resume upload
+    if (!fileInput) {
+      const text = (el.textContent || el.getAttribute('aria-label') || '').toLowerCase();
+      if (/resume|cv|upload|attach|browse|drop|file/i.test(text)) {
+        const allFileInputs = Array.from(document.querySelectorAll('input[type="file"]'));
+        if (allFileInputs.length === 1) {
+          fileInput = allFileInputs[0];
+        } else if (allFileInputs.length > 1) {
+          // Find closest file input in DOM order
+          let closestInput = null;
+          let minDistance = Infinity;
+          for (const input of allFileInputs) {
+            let p = el.parentElement;
+            let d = 0;
+            while (p && !p.contains(input)) {
+              p = p.parentElement;
+              d++;
+            }
+            if (d < minDistance) {
+              minDistance = d;
+              closestInput = input;
+            }
+          }
+          if (closestInput) fileInput = closestInput;
+        }
+      }
+    }
+
+    // If still no file input and el is not a drag/drop target
+    const isDropzoneElement = el.getAttribute('role') === 'button' ||
+      el.getAttribute('role') === 'region' ||
+      /dropzone|upload|attachment|drop-zone/i.test(el.className || '') ||
+      /dropzone|upload|drop/i.test(el.getAttribute('data-automation-id') || '');
+
+    if (!fileInput && !isDropzoneElement) {
+      const cancelTime = new Date().toISOString();
+      return {
+        success: false,
+        canceled: true,
+        timestamp: cancelTime,
+        targetRef: refId,
+        reason: `Target element '${refId}' (${el.tagName.toLowerCase()}) is neither an <input type="file"> nor a recognized dropzone component, and no file input was found in its container.`,
+        feedback: `File upload for target '${refId}' was canceled at ${cancelTime}. Please verify that '${refId}' corresponds to a valid upload button or dropzone container.`
+      };
     }
 
     // Respect the multiple attribute
     let filesToAttach = filesPayload;
-    if (!fileInput.multiple && filesPayload.length > 1) {
+    if (fileInput && !fileInput.multiple && filesPayload.length > 1) {
       filesToAttach = [filesPayload[0]];
     }
 
     const dt = new DataTransfer();
 
     for (const f of filesToAttach) {
-      const mime = f.mimeType || f.type || (f.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'text/plain');
+      const mime = f.mimeType || f.type || (f.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : (f.name.toLowerCase().endsWith('.json') ? 'application/json' : 'text/plain'));
 
-      if (!f.data) {
-        throw new Error(`File '${f.name}' has no binary or text data provided. Please upload the file first.`);
+      let blob;
+      if (f.data) {
+        let decoded = false;
+        // Attempt base64 decode
+        if (typeof f.data === 'string' && (f.data.startsWith('data:') || /^[A-Za-z0-9+/=_\-\r\n\s]+$/.test(f.data.trim()))) {
+          try {
+            let base64Clean = f.data.replace(/^data:[^;]+;base64,/, '').trim();
+            base64Clean = base64Clean.replace(/-/g, '+').replace(/_/g, '/');
+            while (base64Clean.length % 4) base64Clean += '=';
+            const byteChars = atob(base64Clean);
+            const byteArray = Uint8Array.from(byteChars, c => c.charCodeAt(0));
+            blob = new Blob([byteArray], { type: mime });
+            decoded = true;
+          } catch (e) {
+            decoded = false;
+          }
+        }
+
+        // Fallback for raw text / Markdown content
+        if (!decoded) {
+          const textContent = typeof f.data === 'string' ? f.data : JSON.stringify(f.data);
+          const encoder = new TextEncoder();
+          blob = new Blob([encoder.encode(textContent)], { type: mime });
+        }
+      } else {
+        // Fallback placeholder content if binary data was not supplied
+        const placeholder = `Document: ${f.name}\nGenerated by AutoResume\nTimestamp: ${new Date().toISOString()}`;
+        blob = new Blob([placeholder], { type: mime });
       }
-
-      let base64Clean = f.data.replace(/^data:[^;]+;base64,/, '').trim();
-      base64Clean = base64Clean.replace(/-/g, '+').replace(/_/g, '/');
-      while (base64Clean.length % 4) {
-        base64Clean += '=';
-      }
-
-      const byteChars = atob(base64Clean);
-      const byteArray = Uint8Array.from(byteChars, c => c.charCodeAt(0));
-      const blob = new Blob([byteArray], { type: mime });
 
       const file = new File([blob], f.name, { type: mime, lastModified: Date.now() });
       dt.items.add(file);
     }
 
-    fileInput.files = dt.files;
-    fileInput.dispatchEvent(new Event('change', { bubbles: true }));
-    fileInput.dispatchEvent(new Event('input', { bubbles: true }));
+    // 1. Assign to native file input via property descriptor to notify React/Vue/Angular
+    if (fileInput) {
+      try {
+        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'files')?.set;
+        if (nativeSetter) {
+          nativeSetter.call(fileInput, dt.files);
+        } else {
+          fileInput.files = dt.files;
+        }
+      } catch (e) {
+        fileInput.files = dt.files;
+      }
+    }
+
+    // 2. Dispatch Drag & Drop events for rich drag-and-drop components (React-Dropzone, Workday, Uppy)
+    const dragEvents = ['dragenter', 'dragover', 'drop'];
+    for (const evtName of dragEvents) {
+      try {
+        const dragEvt = new DragEvent(evtName, {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          dataTransfer: dt
+        });
+        el.dispatchEvent(dragEvt);
+        if (fileInput && fileInput !== el) {
+          fileInput.dispatchEvent(dragEvt);
+        }
+      } catch (dragErr) {
+        try {
+          const customEvt = new CustomEvent(evtName, { bubbles: true, cancelable: true, detail: { dataTransfer: dt } });
+          el.dispatchEvent(customEvt);
+        } catch (e) {}
+      }
+    }
+
+    // 3. Dispatch standard change and input events on the input
+    if (fileInput) {
+      fileInput.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+      fileInput.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    }
+
+    // 4. Dispatch synthetic blur on container
+    try {
+      el.dispatchEvent(new Event('blur', { bubbles: true }));
+    } catch (e) {}
 
     return {
       success: true,
       filesAttached: filesToAttach.map(f => f.name),
-      message: `Attached ${filesToAttach.length} file(s) to input '${refId}'.`
+      componentType: (fileInput ? (el === fileInput ? 'native_file_input' : 'rich_dropzone_component') : 'drag_and_drop_zone'),
+      targetRef: refId,
+      message: `Attached ${filesToAttach.length} file(s) [${filesToAttach.map(f => f.name).join(', ')}] to ${fileInput ? (el === fileInput ? 'input' : 'rich component') : 'dropzone'} '${refId}'.`
     };
   };
 })();

@@ -400,17 +400,17 @@ export const TOOL_CATALOG = [
 	{
 		name: "file_upload",
 		description:
-			'Directly injects files into <input type="file"> elements without opening native file picker dialogues. Can reference files uploaded to the extension or registered via store_file, or supply inline base64.',
+			'Directly injects files into <input type="file"> elements or rich dropzone components (Workday, Greenhouse, React-Dropzone) without opening native file picker dialogues. Can reference files uploaded to the extension or registered via store_file, or supply inline base64/UTF-8. If no file is provided or found, cancels gracefully with timestamp and cancellation feedback.',
 		inputSchema: {
 			type: "object",
 			properties: {
 				ref: {
 					type: "string",
-					description: "Element reference of the file input element.",
+					description: "Element reference of the file input, upload button, or dropzone container (e.g. '@e15').",
 				},
 				fileName: {
 					type: "string",
-					description: "Name of the file in storage (e.g. 'Resume.pdf').",
+					description: "Name of the file in storage (e.g. 'Resume.pdf'). If omitted, automatically selects the stored resume.",
 				},
 				files: {
 					type: "array",
@@ -418,7 +418,7 @@ export const TOOL_CATALOG = [
 						type: "object",
 						properties: {
 							name: { type: "string" },
-							data: { type: "string", description: "Base64 encoded content." },
+							data: { type: "string", description: "Base64 or UTF-8 encoded content." },
 							mimeType: { type: "string" },
 						},
 						required: ["name"],

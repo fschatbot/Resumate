@@ -295,6 +295,51 @@ export function handleDeleteFile(fileName) {
 }
 
 /**
+ * Searches and retrieves a file from session storage.
+ * If query is provided, performs exact, case-insensitive, or substring matches.
+ * If query is omitted, prioritizes resume/CV documents, or defaults to the first available file.
+ * @param {string} [query] - Optional filename or keyword
+ * @returns {object|null}
+ */
+export function findSessionFile(query) {
+  if (sessionFiles.size === 0) return null;
+
+  if (query && typeof query === 'string') {
+    const qTrim = query.trim();
+    // 1. Exact match
+    if (sessionFiles.has(qTrim)) return sessionFiles.get(qTrim);
+
+    // 2. Case-insensitive match
+    const lower = qTrim.toLowerCase();
+    for (const [name, file] of sessionFiles.entries()) {
+      if (name.toLowerCase() === lower) return file;
+    }
+
+    // 3. Substring / stem match
+    for (const [name, file] of sessionFiles.entries()) {
+      if (name.toLowerCase().includes(lower) || lower.includes(name.toLowerCase())) {
+        return file;
+      }
+    }
+  }
+
+  // 4. Default / fallback: search for resume or cv
+  for (const [name, file] of sessionFiles.entries()) {
+    if (/resume|cv|curriculum/i.test(name)) {
+      return file;
+    }
+  }
+
+  // 5. If only one file exists, return it
+  if (sessionFiles.size === 1) {
+    return sessionFiles.values().next().value;
+  }
+
+  // 6. Otherwise return first file
+  return sessionFiles.values().next().value || null;
+}
+
+/**
  * Lists all files currently available in session storage.
  * @returns {object}
  */

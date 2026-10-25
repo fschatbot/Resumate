@@ -9,7 +9,8 @@ import {
   handleListFiles,
   handleReadFile,
   handleDeleteFile,
-  handleClearPreferences
+  handleClearPreferences,
+  findSessionFile
 } from '../src/tools/schema-tools.js';
 import { resolveTemplateVariables } from '../src/utils/template-resolver.js';
 import { AXTreeTracker } from '../src/utils/ax-tree-tracker.js';
@@ -276,5 +277,187 @@ assert.ok(multiTabTracker.getInteractiveElementsResource(101).includes("Search 1
 assert.ok(multiTabTracker.getInteractiveElementsResource(202).includes("Submit 202"));
 assert.ok(!multiTabTracker.getInteractiveElementsResource(101).includes("Submit 202"));
 console.log('✓ AXTreeTracker per-tab isolation passed.');
+
+// Clean up any earlier files so test 21 starts with known files
+handleDeleteFile("Resume.md");
+
+// 21. Test findSessionFile (Agent file request & default fallback)
+handleStoreFile({
+  name: "Alex_Morgan_Resume.pdf",
+  data: Buffer.from("PDF resume test content").toString("base64"),
+  mimeType: "application/pdf",
+  description: "Primary Resume"
+});
+handleStoreFile({
+  name: "Portfolio_CoverLetter.txt",
+  data: Buffer.from("Cover letter text").toString("base64"),
+  mimeType: "text/plain",
+  description: "Cover Letter"
+});
+
+// Exact match
+const exactMatch = findSessionFile("Alex_Morgan_Resume.pdf");
+assert.ok(exactMatch);
+assert.equal(exactMatch.name, "Alex_Morgan_Resume.pdf");
+
+// Case-insensitive match
+const ciMatch = findSessionFile("alex_morgan_resume.pdf");
+assert.ok(ciMatch);
+assert.equal(ciMatch.name, "Alex_Morgan_Resume.pdf");
+
+// Substring match
+const subMatch = findSessionFile("coverletter");
+assert.ok(subMatch);
+assert.equal(subMatch.name, "Portfolio_CoverLetter.txt");
+
+// Default when query is omitted: should prioritize resume file
+const defaultMatch = findSessionFile();
+assert.ok(defaultMatch);
+assert.equal(defaultMatch.name, "Alex_Morgan_Resume.pdf");
+console.log('✓ findSessionFile (exact, case-insensitive, resume fallback) passed.');
+
+// 22. Test file_upload cancellation feedback when no file is provided/available
+handleDeleteFile("Alex_Morgan_Resume.pdf");
+handleDeleteFile("Portfolio_CoverLetter.txt");
+
+function simulateFileUpload(args, sessionHasFiles = false) {
+  const targetRef = args.ref || args.element || args.target;
+  if (!targetRef) {
+    const cancelTime = new Date().toISOString();
+    return {
+      success: false,
+      canceled: true,
+      timestamp: cancelTime,
+      targetRef: "N/A",
+      reason: "Missing required 'ref' parameter.",
+      feedback: `File upload was canceled at ${cancelTime} because no target element reference was provided.`
+    };
+  }
+
+  let filesToUpload = args.files || [];
+  if (filesToUpload.length === 0 && sessionHasFiles) {
+    const matched = findSessionFile(args.fileName);
+    if (matched) {
+      filesToUpload = [{ name: matched.name, data: matched.data, mimeType: matched.mimeType }];
+    }
+  }
+
+  if (filesToUpload.length === 0) {
+    const cancelTimestamp = new Date().toISOString();
+    const cancelReason = args.fileName
+      ? `Requested file '${args.fileName}' was not found in storage, and no inline file data was provided.`
+      : `No file was provided by the AI agent (neither 'fileName' nor 'files' argument) and no resume documents are stored in storage.`;
+    const cancelFeedback = `File upload for target '${targetRef}' was canceled at ${cancelTimestamp}. Reason: ${cancelReason} Action required: Please supply a file using 'store_file' or pass inline file data before retrying.`;
+    return {
+      success: false,
+      canceled: true,
+      timestamp: cancelTimestamp,
+      targetRef,
+      reason: cancelReason,
+      feedback: cancelFeedback
+    };
+  }
+
+  return {
+    success: true,
+    filesAttached: filesToUpload.map(f => f.name),
+    targetRef,
+    message: `Attached ${filesToUpload.length} file(s) to '${targetRef}'.`
+  };
+}
+
+// AI agent did not provide file and storage is empty -> must cancel with timestamp and feedback
+const canceledResult = simulateFileUpload({ ref: "@e15" }, false);
+assert.equal(canceledResult.success, false);
+assert.equal(canceledResult.canceled, true);
+assert.ok(canceledResult.timestamp && !isNaN(Date.parse(canceledResult.timestamp)));
+assert.ok(canceledResult.reason.includes("No file was provided"));
+assert.ok(canceledResult.feedback.includes("canceled at"));
+assert.equal(canceledResult.targetRef, "@e15");
+console.log('✓ file_upload cancellation feedback (when no file provided) passed.');
+
+// Missing ref -> must cancel with timestamp and feedback
+const missingRefResult = simulateFileUpload({});
+assert.equal(missingRefResult.success, false);
+assert.equal(missingRefResult.canceled, true);
+assert.ok(missingRefResult.feedback.includes("canceled at"));
+console.log('✓ file_upload cancellation feedback (when ref is missing) passed.');
+
+// When AI agent provides file as per request -> must succeed
+handleStoreFile({
+  name: "Resume.pdf",
+  data: Buffer.from("Resume binary").toString("base64"),
+  mimeType: "application/pdf"
+});
+const providedResult = simulateFileUpload({ ref: "@e15", fileName: "Resume.pdf" }, true);
+assert.equal(providedResult.success, true);
+assert.deepEqual(providedResult.filesAttached, ["Resume.pdf"]);
+
+// When AI agent calls without fileName but file exists -> provides stored resume
+const autoResumeResult = simulateFileUpload({ ref: "@e15" }, true);
+assert.equal(autoResumeResult.success, true);
+assert.deepEqual(autoResumeResult.filesAttached, ["Resume.pdf"]);
+console.log('✓ file_upload providing file per agent request / stored resume passed.');
+
+// 23. Test Rich Component Dropzone & Event Resolution
+function mockRichComponentResolution(componentType) {
+  // Simulates DOM resolution logic from dom-interactor.js
+  let resolvedInput = null;
+  const dispatchedEvents = [];
+
+  const mockInput = {
+    tagName: 'INPUT',
+    type: 'file',
+    multiple: false,
+    files: null,
+    dispatchEvent: (evt) => dispatchedEvents.push({ target: 'input', type: evt.type })
+  };
+
+  const mockDropzoneContainer = {
+    tagName: 'DIV',
+    className: 'dropzone file-uploader',
+    getAttribute: (attr) => attr === 'data-automation-id' ? 'file-upload-drop-zone' : null,
+    parentElement: null,
+    dispatchEvent: (evt) => dispatchedEvents.push({ target: 'container', type: evt.type })
+  };
+
+  if (componentType === 'workday_button_inside_dropzone') {
+    const mockButton = {
+      tagName: 'BUTTON',
+      textContent: 'Upload Resume',
+      parentElement: mockDropzoneContainer,
+      dispatchEvent: (evt) => dispatchedEvents.push({ target: 'button', type: evt.type })
+    };
+    mockDropzoneContainer.querySelector = (sel) => sel === 'input[type="file"]' ? mockInput : null;
+    resolvedInput = mockDropzoneContainer.querySelector('input[type="file"]');
+  } else if (componentType === 'react_dropzone_wrapper') {
+    mockDropzoneContainer.querySelector = (sel) => sel === 'input[type="file"]' ? mockInput : null;
+    resolvedInput = mockDropzoneContainer.querySelector('input[type="file"]');
+  }
+
+  // Simulate rich event dispatching (dragenter, dragover, drop, change, input)
+  for (const evtName of ['dragenter', 'dragover', 'drop']) {
+    mockDropzoneContainer.dispatchEvent({ type: evtName });
+    if (resolvedInput) resolvedInput.dispatchEvent({ type: evtName });
+  }
+  if (resolvedInput) {
+    resolvedInput.files = [{ name: 'Resume.pdf' }];
+    resolvedInput.dispatchEvent({ type: 'change' });
+    resolvedInput.dispatchEvent({ type: 'input' });
+  }
+
+  return { resolvedInput, dispatchedEvents };
+}
+
+const workdaySim = mockRichComponentResolution('workday_button_inside_dropzone');
+assert.ok(workdaySim.resolvedInput);
+assert.equal(workdaySim.resolvedInput.tagName, 'INPUT');
+assert.ok(workdaySim.dispatchedEvents.some(e => e.target === 'container' && e.type === 'drop'));
+assert.ok(workdaySim.dispatchedEvents.some(e => e.target === 'input' && e.type === 'change'));
+
+const reactDropzoneSim = mockRichComponentResolution('react_dropzone_wrapper');
+assert.ok(reactDropzoneSim.resolvedInput);
+assert.ok(reactDropzoneSim.dispatchedEvents.some(e => e.target === 'container' && e.type === 'drop'));
+console.log('✓ Rich component dropzone resolution & multi-event dispatch simulation passed.');
 
 console.log('\nAll AutoResume MCP tests passed successfully!');

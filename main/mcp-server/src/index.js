@@ -30,6 +30,7 @@ import {
   handleReadFile,
   handleDeleteFile,
   handleClearPreferences,
+  findSessionFile,
   setSyncCallback
 } from './tools/schema-tools.js';
 import {
@@ -125,6 +126,20 @@ function formatToolSuccess(result, toolName, delta, options) {
     const header = result?.title ? `[Page: "${result.title}" | Interactive Nodes: ${result.interactiveCount || 0} | URL: ${result.url || ""}]\n\n` : "";
     return {
       content: [{ type: "text", text: header + textOutput }]
+    };
+  }
+
+  // Graceful cancellation reporting (e.g. file_upload when no file provided or available)
+  if (result && result.canceled) {
+    const cancelText = [
+      `[File Upload Canceled]`,
+      `Timestamp: ${result.timestamp || new Date().toISOString()}`,
+      `Target: ${result.targetRef || options?.ref || "N/A"}`,
+      `Reason: ${result.reason || "No file was supplied or found."}`,
+      `Feedback: ${result.feedback || result.message || "File upload canceled."}`
+    ].join('\n');
+    return {
+      content: [{ type: "text", text: cancelText }]
     };
   }
 
@@ -258,6 +273,29 @@ async function processJsonRpcRequest(request) {
         }
 
         // Validate required arguments declared in tool schema
+        if (toolName === "file_upload") {
+          if (!rawArgs.ref && (rawArgs.element || rawArgs.target)) {
+            rawArgs.ref = rawArgs.element || rawArgs.target;
+          }
+          if (!rawArgs.ref) {
+            const cancelTime = new Date().toISOString();
+            const cancelReason = "Missing required target reference ('ref') for file upload.";
+            const cancelFeedback = `File upload was canceled at ${cancelTime}. Reason: ${cancelReason} Action required: Please specify the target element reference (e.g. { ref: "@e15" }) where the resume/file should be uploaded.`;
+            return {
+              jsonrpc: "2.0",
+              id,
+              result: formatToolSuccess({
+                success: false,
+                canceled: true,
+                timestamp: cancelTime,
+                targetRef: "N/A",
+                reason: cancelReason,
+                feedback: cancelFeedback
+              }, toolName, null, rawArgs)
+            };
+          }
+        }
+
         const toolDef = TOOLS_BY_NAME.get(toolName);
         if (toolDef?.inputSchema?.required) {
           for (const reqField of toolDef.inputSchema.required) {
@@ -328,6 +366,54 @@ async function processJsonRpcRequest(request) {
               filter: filterArg
             });
             postMutationDelta = globalAXTreeTracker.updatePageState(executionResult, resolvedArgs.tabId);
+          } else if (toolName === "file_upload") {
+            resolvedArgs.ref = resolvedArgs.ref || resolvedArgs.element || resolvedArgs.target;
+
+            // 1. If AI agent provided inline file data, save to session storage
+            if (Array.isArray(resolvedArgs.files) && resolvedArgs.files.length > 0) {
+              for (const f of resolvedArgs.files) {
+                if (f && f.name) {
+                  try { handleStoreFile(f); } catch (e) {}
+                }
+              }
+            } else {
+              // 2. Look up stored file requested by the AI agent, or fallback to stored resume
+              const requestedName = resolvedArgs.fileName || null;
+              const matchedFile = findSessionFile(requestedName);
+              if (matchedFile) {
+                resolvedArgs.fileName = matchedFile.name;
+                resolvedArgs.files = [{
+                  name: matchedFile.name,
+                  data: matchedFile.data,
+                  mimeType: matchedFile.mimeType || matchedFile.type
+                }];
+              }
+            }
+
+            // 3. If no file was provided and none found in sessionFiles, and bridge is not connected:
+            if (!bridge.isConnected && (!resolvedArgs.files || resolvedArgs.files.length === 0)) {
+              const cancelTimestamp = new Date().toISOString();
+              const cancelReason = resolvedArgs.fileName
+                ? `File '${resolvedArgs.fileName}' requested by the AI agent was not found in session storage, and the browser extension is not connected.`
+                : `No file was provided by the AI agent (neither 'fileName' nor 'files' argument) and no resume documents are stored in session memory.`;
+              const cancelFeedback = `File upload for target '${resolvedArgs.ref}' was canceled at ${cancelTimestamp}. Reason: ${cancelReason} Action required: Please supply a file using 'store_file' or pass inline file data before retrying.`;
+
+              executionResult = {
+                success: false,
+                canceled: true,
+                timestamp: cancelTimestamp,
+                targetRef: resolvedArgs.ref,
+                reason: cancelReason,
+                feedback: cancelFeedback
+              };
+            } else {
+              executionResult = await bridge.executeTool("file_upload", resolvedArgs);
+            }
+
+            if (executionResult && !executionResult.canceled && (executionResult.compactTree || executionResult.yaml)) {
+              globalAXTreeTracker.updatePageState(executionResult, resolvedArgs.tabId);
+            }
+            postMutationDelta = executionResult?.canceled ? null : (executionResult?.delta || null);
           } else {
             // Browser action tool execution: run once!
             executionResult = await bridge.executeTool(toolName, resolvedArgs);

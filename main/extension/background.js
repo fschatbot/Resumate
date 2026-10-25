@@ -1457,20 +1457,67 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
       sessionStats.filesImportedCount++;
       broadcastTelemetry();
 
-      let filesToUpload = params.files || [];
+      const targetRef = params.ref || params.element || params.target;
+      if (!targetRef) {
+        const cancelTimestamp = new Date().toISOString();
+        toolResult = {
+          success: false,
+          canceled: true,
+          timestamp: cancelTimestamp,
+          targetRef: "N/A",
+          reason: "Missing required 'ref' parameter specifying the target element or dropzone.",
+          feedback: `File upload was canceled at ${cancelTimestamp} because no target element reference was provided.`
+        };
+        break;
+      }
 
-      if (params.fileName && filesToUpload.length === 0) {
+      let filesToUpload = Array.isArray(params.files) ? params.files : [];
+
+      if (filesToUpload.length === 0) {
         const storageData = await chrome.storage.local.get(["files"]);
-        const found = (storageData.files || []).find(f => f.name.toLowerCase() === params.fileName.toLowerCase());
-        if (found) {
-          filesToUpload = [{
-            name: found.name,
-            data: found.data || null,
-            mimeType: found.type || found.mimeType
-          }];
+        const storageFiles = Array.isArray(storageData.files) ? storageData.files : [];
+
+        if (params.fileName) {
+          const lowerName = params.fileName.toLowerCase();
+          const found = storageFiles.find(f => f.name.toLowerCase() === lowerName) ||
+                        storageFiles.find(f => f.name.toLowerCase().includes(lowerName) || lowerName.includes(f.name.toLowerCase()));
+          if (found) {
+            filesToUpload = [{
+              name: found.name,
+              data: found.data || null,
+              mimeType: found.type || found.mimeType
+            }];
+          }
         } else {
-          throw new Error(`File '${params.fileName}' not found in extension storage. Please upload the file in the extension side panel or call store_file first.`);
+          // Provide resume or first file if AI agent did not specify fileName
+          const found = storageFiles.find(f => /resume|cv|curriculum/i.test(f.name)) || storageFiles[0];
+          if (found) {
+            filesToUpload = [{
+              name: found.name,
+              data: found.data || null,
+              mimeType: found.type || found.mimeType
+            }];
+          }
         }
+      }
+
+      // If still no file is provided or found, cancel cleanly with feedback
+      if (filesToUpload.length === 0) {
+        const cancelTimestamp = new Date().toISOString();
+        const cancelReason = params.fileName
+          ? `File '${params.fileName}' requested by the AI agent was not found in storage, and no inline file data was provided.`
+          : `No file was provided by the AI agent (neither 'fileName' nor 'files' argument) and no resume documents were found in storage.`;
+        const cancelFeedback = `File upload for target '${targetRef}' was canceled at ${cancelTimestamp}. Reason: ${cancelReason} Action required: Please supply a file using 'store_file', upload via the side panel, or pass inline file data before retrying.`;
+
+        toolResult = {
+          success: false,
+          canceled: true,
+          timestamp: cancelTimestamp,
+          targetRef,
+          reason: cancelReason,
+          feedback: cancelFeedback
+        };
+        break;
       }
 
       const res = await chrome.scripting.executeScript({
@@ -1481,7 +1528,7 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
           }
           throw new Error("File injection helper not initialized.");
         },
-        args: [params.ref, filesToUpload]
+        args: [targetRef, filesToUpload]
       });
       toolResult = res[0]?.result || { success: true };
       break;

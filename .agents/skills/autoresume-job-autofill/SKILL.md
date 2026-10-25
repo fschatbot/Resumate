@@ -54,7 +54,7 @@ All 37 AutoResume MCP tools are documented below. Use these exact parameters:
 | `browser_drag` | `{ startElement?: string, endElement?: string, startCoordinates?: {x,y}, endCoordinates?: {x,y}, tabId?: number }` | Trusted CDP drag-and-drop simulation. |
 | `browser_wait` | `{ time?: number, seconds?: number, duration?: number }` | Pauses execution for $N$ seconds (e.g. `{ "time": 0.15 }`). |
 | `browser_batch` | `{ actions: Array<{ tool: string, params: Object }>, stopOnError?: boolean, tabId?: number }` | **Compound transaction execution**. Runs a sequence of actions in one round-trip with fail-fast error isolation and returns aggregate post-batch mutation delta. |
-| `file_upload` | `{ ref: string, fileName?: string, files?: Array, tabId?: number }` | Injects stored session files (e.g. `Resume.pdf`) into `<input type="file">` elements via native DataTransfer. |
+| `file_upload` | `{ ref: string, fileName?: string, files?: Array, tabId?: number }` | Injects files into `<input type="file">` elements or rich dropzone components (Workday, React-Dropzone) via DataTransfer & drag events. Falls back to stored resume, or cancels with feedback if no file is provided. |
 | `store_file` | `{ name: string, data?: string, mimeType?: string, description?: string }` | Registers a file in session storage for web form injection. |
 | `list_files` | `{}` | Lists all files currently stored or uploaded in session storage. |
 | `read_file` | `{ name: string, includeBase64?: boolean }` | Reads text and metadata of a stored resume/document file. |
@@ -200,7 +200,11 @@ Construct and execute **ONE COMPREHENSIVE `browser_batch`** filling 90–100% of
 - **Stage 2 (Secondary — Discovered Options & Labels)**: In the same batch, use `browser_click` on discovered combobox options (`@e...`) and on `<label for="...">` for styled radios/checkboxes (Gender, Race, Veteran, Disability).
 
 ### Phase 5: Complex Elements & Attachments
-1. **File Uploads**: Call `file_upload({ ref: "@e1", fileName: "Resume.pdf" })` for resume/attachment dropzones.
+1. **File Uploads & Rich Dropzones**:
+   - Call `file_upload({ ref: "@e1", fileName: "Resume.pdf" })` or provide inline `files: [{ name: "Resume.pdf", data: "...", mimeType: "application/pdf" }]`.
+   - The tool automatically handles rich dropzones (Workday, Greenhouse, React-Dropzone), resolves shadow DOMs and wrapper buttons, and fires native drag-and-drop events (`dragenter`, `dragover`, `drop`).
+   - If `fileName` is omitted, `file_upload({ ref: "@e1" })` automatically attaches the stored resume document.
+   - If no file was provided or found, the tool cancels cleanly and returns structured feedback with a timestamp and reason explaining why it was canceled, instead of failing.
 2. **Multi-Step Forms**: If a "Next" / "Continue" button exists, click it to advance to the next step, repeating Phase 2 & 4. **NEVER click the final "Submit" button.**
 3. **CAPTCHA**: If a CAPTCHA challenge is detected, surface it in `User Actions Remaining` — do not attempt automated clicks.
 
