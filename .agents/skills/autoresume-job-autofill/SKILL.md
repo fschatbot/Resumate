@@ -25,25 +25,80 @@ All AutoResume MCP tools are documented below. Use these exact parameters:
 
 | Tool | Parameters | Description & Usage Example |
 | :--- | :--- | :--- |
-| `get_preferences` | `{}` | Returns loaded applicant profile: `{ preferences: Object, valid: boolean }`. |
-| `set_preferences` | `{ preferences: Object, source?: string }` | Activates profile & template substitution (`${preferences.*}`). |
-| `validate_preferences_schema` | `{ section?: string }` | Validates loaded preferences against schema: `{ valid: boolean, errors: string[] }`. |
-| `tabs_context` | `{}` | Lists all tabs: `[ { id, title, url, active, groupId } ]`. |
-| `tabs_context_mcp` | `{ createIfEmpty?: boolean }` | Lists tabs confined to the `AutoResume (MCP)` group. |
-| `browser_snapshot` | `{ filter?: "interactive" \| "all" \| "delta", deltaOnly?: boolean, format?: "compact" \| "yaml", depth?: number }` | Returns compact flat matrix or delta diff. *(Recommended: `filter: "interactive", depth: 30`)*. |
-| `browser_screenshot` | `{}` | Returns `{ screenshotBase64: string }` visual view of the layout. |
-| `form_input` | `{ ref: string, value: any }` | **Primary text/select/checkbox tool**. Natively sets values with React/Vue event dispatch. Supports `${preferences.*}` templates. Example: `{ "ref": "@e12", "value": "${preferences.general.email}" }`. Returns mutation delta if UI changes. |
-| `browser_click` | `{ element: string, button?: "left", clickCount?: number }` | Clicks target `@e...` or CSS selector (e.g. `label[for="..."]`). Snaps into view instantly. Returns mutation delta if UI changes. |
-| `browser_hover` | `{ element: string, durationMs?: number }` | Hovers element (maintains hover >= 100ms). |
-| `browser_type` | `{ element: string, text: string, delay?: number }` | Simulates keystrokes for autocomplete / search-as-you-type inputs. |
-| `browser_wait` | `{ time: number }` | Pauses for `time` seconds (e.g. `{ "time": 0.1 }`). |
-| `browser_batch` | `{ actions: Array<{ tool: string, params: Object }>, stopOnError?: boolean }` | **Compound transaction execution**. Executes dozens of sub-steps in one round-trip. Counts as 1 tool call. Returns aggregate mutation delta. |
-| `file_upload` | `{ fileName?: string, files?: Array }` | Injects resume/attachments from storage. Example: `{ "fileName": "Resume.pdf" }`. |
-| `get_tool_definitions` | `{ toolName?: string }` | Returns parameter schemas for any tool on demand. |
+| `get_preferences` | `{ path?: string }` | Returns loaded applicant profile (`{ success: true, data: Object }`) or a specific dot/bracket path (e.g. `"general.phone.digits10"`)[cite: 3, 4]. |
+| `set_preferences` | `{ preferences: Object, source?: string }` | Validates & activates applicant profile and `${preferences.*}` template substitution. |
+| `update_preferences_section` | `{ section: string, data: any, overwrite?: boolean }` | Merges or updates a specific section (`general`, `education`, `experience`, `skills`, `demographicsAndLegal`, `customQA`)[cite: 3, 4]. |
+| `validate_preferences_schema` | `{ section?: string, preferences?: Object }` | Validates active or custom preferences against schema: `{ valid: boolean, errors: string[] }`[cite: 3, 4, 11]. |
+| `tabs_context` | `{}` | Lists all window tabs: `[ { id, title, url, active, groupId } ]`[cite: 3, 5, 11]. |
+| `tabs_context_mcp` | `{ createIfEmpty?: boolean }` | Lists tabs confined to the `AutoResume (MCP)` group[cite: 3, 5, 11]. |
+| `tabs_target` | `{ tabId?: number }` | Targets a tab into the `AutoResume (MCP)` group and attaches DevTools Protocol (CDP). |
+| `browser_snapshot` | `{ filter?: "interactive" \| "all" \| "delta", deltaOnly?: boolean, format?: "compact" \| "yaml", rootRefId?: string, depth?: number, maxChars?: number }` | Extracts the logically compacted Semantic Accessibility Tree (AST) or contextual delta diff[cite: 3, 8, 11]. Defaults: `filter: "interactive", format: "compact", depth: 30`. Use `rootRefId: "@e10"` to scope to a specific modal/section. |
+| `find` | `{ query: string }` | Searches the live semantic AST by natural language, role, label, value, placeholder, or group name and returns matching `@eX` handles[cite: 3, 5]. |
+| `browser_screenshot` | `{ fullPage?: boolean }` | Returns `{ screenshotBase64: string }` visual capture of the viewport[cite: 3, 5, 11]. |
+| `form_input` | `{ ref: string, value: any }` | **Primary text/select/checkbox/radio tool**. Natively sets values with React/Vue event dispatch and automatic `<label>` resolution for styled checkboxes/radios[cite: 3, 9]. Supports `${preferences.*}` templates[cite: 2, 3, 11]. Example: `{ "ref": "@e12", "value": "${preferences.general.email}" }`. |
+| `browser_select_option` | `{ element: string, values: string[] }` | Selects one or more options on a native `<select>` (`combobox:select`) by value, visible label, or index[cite: 3, 5]. |
+| `browser_click` | `{ element?: string, coordinates?: {x, y}, scroll?: boolean, button?: "left" \| "right" \| "middle", clickCount?: 1 \| 2 \| 3 }` | Trusted hardware CDP mouse click (100ms hold) on `@eX`, semantic role (`button "Apply"`), or CSS selector[cite: 3, 5, 10, 11]. Automatically resolves visible `<label>` bounding boxes if `@eX` is a zero-size hidden input. |
+| `browser_hover` | `{ element?: string, coordinates?: {x, y}, duration?: number, scroll?: boolean }` | Trusted CDP mouse hover (maintains hover $\ge$ 100ms, default 150ms) to trigger dropdowns or tooltips[cite: 3, 5, 11]. |
+| `browser_type` | `{ element?: string, text: string, clearValue?: boolean, delay?: number }` | Simulates human keystrokes (default `delay: 25`ms) for autocomplete / search-as-you-type comboboxes[cite: 3, 5, 9, 11]. Supports `${preferences.*}` templates[cite: 2, 3]. |
+| `browser_press_key` | `{ key: string, modifiers?: Array<"Alt"\|"Control"\|"Meta"\|"Shift"> }` | Dispatches keyboard events (`"Enter"`, `"Tab"`, `"Escape"`, `"ArrowDown"`, `"Backspace"`) to the focused element[cite: 3, 5]. |
+| `browser_wait` | `{ time: number }` | Pauses execution for `time` seconds (e.g. `{ "time": 0.15 }`)[cite: 3, 5, 11]. |
+| `browser_batch` | `{ actions: Array<{ tool: string, params: Object }>, stopOnError?: boolean }` | **Compound transaction execution**[cite: 3, 11]. Runs a sequence of actions in one round-trip with fail-fast error isolation and returns the aggregate post-batch mutation delta[cite: 3, 5, 11]. |
+| `file_upload` | `{ ref: string, fileName?: string, files?: Array }` | Directly injects stored files (e.g. `Resume.pdf`) into `<input type="file">` (`file` role) via DataTransfer without opening OS file pickers. Example: `{ "ref": "@e8", "fileName": "Resume.pdf" }`[cite: 3, 5]. |
+| `list_files` / `read_file` | `{}` / `{ name: string }` | Lists or reads uploaded session files (`Resume.pdf`, `Resume.md`, `preferences.json`)[cite: 3, 4]. |
+| `get_tool_definitions` | `{ toolName?: string }` | Returns full JSON schema definitions for any tool on demand[cite: 3, 11]. |
 
 ---
 
-## 3. High-Speed 6-Phase Pipeline
+## 3. Understanding the Redesigned Semantic AST & Delta Format
+
+### 3.1 Compact Semantic Tree Syntax (`format: "compact"`)
+The accessibility engine dissolves generic DOM layout wrappers (`<div>`, `<span>`) and indents **only on true semantic boundaries** (`form`, `group`, `radiogroup`, `dialog`, `region`, `list`, `table`, `row`):
+
+```text
+[# Page: "Software Engineer - Apply" | Interactive: 14 | URL: [https://boards.greenhouse.io/example](https://boards.greenhouse.io/example) | Focus: @e1]
+[form "Application Form"]
+  @e1 file "Attach Resume/CV" = "" [required, hidden-input]
+  @e2 textbox "First Name" = "Jane" [required, focused]
+  @e3 textbox "Last Name" = "" (placeholder: "Enter last name") [required, invalid: "Last name is required"]
+  @e4 textbox:email "Email" = "jane@doe.com" [required]
+  @e5 combobox:select "Country" = "United States" (52 options: "United States", "Canada", "United Kingdom", "Germany", "France", …) [required]
+  [group "Work Experience 1"]
+    @e6 textbox "Company Name" = "" [required]
+    @e7 textbox "Job Title" = "" [required]
+    @e8 checkbox "I currently work here" [checked]
+  [radiogroup "Are you legally authorized to work in the United States?" [required]]
+    @e9 radio "Yes" [checked]
+    @e10 radio "No"
+  [radiogroup "Will you now or in the future require visa sponsorship?" [required]]
+    @e11 radio "Yes"
+    @e12 radio "No"
+  @e13 combobox "School or University" = "" (placeholder: "Type to search...") [collapsed, required]
+  @e14 button:submit "Submit Application"
+```
+
+Key AST Rules to Leverage:
+1. Parent Question & Section Preservation: Multi-choice questions ([radiogroup "..."]) and repeatable blocks ([group "Work Experience 1"]) wrap their child @eX controls so "Yes" / "No" radios and repeated "Company Name" inputs are never ambiguous.
+2. Role Subtypes: Roles include subtypes where applicable (textbox:email, textbox:tel, textbox:date, textbox:multiline, combobox:select, combobox:multi, spinbutton:number, file:multi, button:submit).
+3. Closed Native `<select>` Summary: Native `<select>` dropdowns (`combobox:select`) display an inline preview of their options (52 options: "United States", ...) without cluttering the tree with 52 separate option nodes. You can set them immediately with form_input or browser_select_option without clicking to open them first!
+4. Composite Widget Values: Custom React-Select, MUI, Radix, and Workday comboboxes automatically extract selected single-value or multi-value chip/tag labels into = "Value".
+5. Hidden Control Rescue: Visually-hidden native inputs (<input type="file">, custom styled checkboxes/radios) are automatically rescued into the tree (e.g., @e1 file "Attach Resume/CV" [hidden-input]). Calling file_upload, form_input, or browser_click on their @eX handle automatically targets the underlying input or its visible <label> wrapper.
+6. Non-Default State Compression: Only active/non-default states are emitted (checked, mixed, selected, required, invalid: "...", expanded, collapsed, disabled, readonly, focused, multiselect). Any checkbox/radio without checked is unchecked.
+
+3.2 Contextual Mutation Delta Format
+Every mutating action returns a concise diff of what changed on the page:
+```text
+Plaintext[DOM Mutation Delta | +4 ~1 -0]
+[Focus -> @e13 (combobox "School or University")]
+! [ALERT] "Please complete all required fields marked with *"
+~ @e13 combobox "School or University": -collapsed, +expanded
++ [in Application Form]:
+  + @e15 option "Pennsylvania State University"
+  + @e16 option "University of Pennsylvania"
+  + @e17 option "Carnegie Mellon University"
+```
+When a popup listbox closes after selection, bulk option removals are automatically summarized into a single line:- Closed 24 popup options (@e15..@e38)
+
+## 4. High-Speed 6-Phase Pipeline
 
 ```mermaid
 flowchart TD

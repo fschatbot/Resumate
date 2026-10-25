@@ -2,8 +2,8 @@
  * background.js - AutoResume Extension Background Service Worker
  *
  * Implements tab grouping isolation, WebSocket client connection to the desktop
- * MCP server, CDP/DOM action execution, batch transaction management, tool call logging,
- * and dynamic bi-directional sync of preferences and user files.
+ * MCP server, CDP/DOM action execution, automatic post-action accessibility delta capture,
+ * batch transaction management, tool call logging, and dynamic bi-directional sync.
  */
 
 import { validatePreferences } from './validator.js';
@@ -35,6 +35,22 @@ const toolExecutionHistory = [];
 const monitoredConsoleLogs = [];
 const monitoredNetworkRequests = [];
 
+const MUTATING_BROWSER_TOOLS = new Set([
+  'browser_click',
+  'browser_double_click',
+  'browser_triple_click',
+  'browser_type',
+  'browser_press_key',
+  'browser_select_option',
+  'form_input',
+  'file_upload',
+  'browser_drag',
+  'browser_batch',
+  'browser_navigate',
+  'browser_go_back',
+  'browser_go_forward'
+]);
+
 // Persist session state across MV3 idle terminations
 async function saveSessionState() {
   if (chrome.storage.session) {
@@ -56,7 +72,6 @@ async function restoreSessionState() {
     } catch (e) {}
   }
 
-  // Verify group is still valid in Chrome
   if (mcpGroupId !== null) {
     try {
       const group = await chrome.tabGroups.get(mcpGroupId);
@@ -96,7 +111,6 @@ restoreSessionState().then(() => {
   connectWebSocketBridge();
 });
 
-// Action click fallback
 chrome.action.onClicked.addListener(async (tab) => {
   if (!tab || !tab.id) return;
   await isolateTabIntoMcpGroup(tab.id);
@@ -109,15 +123,12 @@ chrome.action.onClicked.addListener(async (tab) => {
 // Tab Group Confinement & Lifecycle Handlers
 // ============================================================================
 
-/**
- * Ensures required content scripts are injected into target tab even if it was opened before extension load.
- */
 async function ensureContentScriptsInjected(tabId) {
   if (!tabId) return;
   try {
     const check = await chrome.scripting.executeScript({
       target: { tabId },
-      func: () => typeof window.__buildAccessibilityTree === 'function'
+      func: () => typeof window.__generateAccessibilityTree === 'function'
     });
     if (!check[0]?.result) {
       await chrome.scripting.executeScript({
@@ -130,7 +141,7 @@ async function ensureContentScriptsInjected(tabId) {
       });
     }
   } catch (e) {
-    // Restricted tab (e.g. chrome://) or already navigating
+    // Restricted tab (e.g. chrome://) or currently navigating
   }
 }
 
@@ -161,7 +172,6 @@ export async function isolateTabIntoMcpGroup(tabId) {
       }
     }
 
-    // Create fresh tab group
     mcpGroupId = await chrome.tabs.group({ tabIds: [tabId] });
     await chrome.tabGroups.update(mcpGroupId, {
       title: MCP_TAB_GROUP_TITLE,
@@ -181,32 +191,20 @@ export async function isolateTabIntoMcpGroup(tabId) {
   }
 }
 
-/**
- * Robustly verifies tab confinement to the AutoResume (MCP) tab group.
- * Does not silently kidnap tabs or auto-group unconfined tabs without user action.
- * @param {number|null} tabId
- * @returns {Promise<number|null>}
- */
 async function verifyTabConfinement(tabId) {
-  // If an explicit tabId was requested
   if (tabId) {
-    try {
-      const tab = await chrome.tabs.get(tabId);
-      if (!tab) throw new Error(`Tab #${tabId} not found.`);
-      if (mcpGroupId !== null && tab.groupId === mcpGroupId) {
-        activeMcpTabId = tabId;
-        sessionStats.activeTabId = tabId;
-        sessionStats.activeTabTitle = tab.title || "";
-        sessionStats.activeTabUrl = tab.url || "";
-        return tabId;
-      }
-      throw new Error(`Tab #${tabId} is not in the AutoResume (MCP) tab group. Please target this tab first or use tabs_target.`);
-    } catch (e) {
-      throw e;
+    const tab = await chrome.tabs.get(tabId);
+    if (!tab) throw new Error(`Tab #${tabId} not found.`);
+    if (mcpGroupId !== null && tab.groupId === mcpGroupId) {
+      activeMcpTabId = tabId;
+      sessionStats.activeTabId = tabId;
+      sessionStats.activeTabTitle = tab.title || "";
+      sessionStats.activeTabUrl = tab.url || "";
+      return tabId;
     }
+    throw new Error(`Tab #${tabId} is not in the AutoResume (MCP) tab group. Please target this tab first or use tabs_target.`);
   }
 
-  // If no tabId was requested, verify current activeMcpTabId
   if (activeMcpTabId) {
     try {
       const tab = await chrome.tabs.get(activeMcpTabId);
@@ -221,7 +219,6 @@ async function verifyTabConfinement(tabId) {
     }
   }
 
-  // Look for any surviving tab within mcpGroupId
   if (mcpGroupId !== null) {
     try {
       const groupTabs = await chrome.tabs.query({ groupId: mcpGroupId });
@@ -337,11 +334,8 @@ async function sendCdpCommand(tabId, method, params = {}) {
 }
 
 /**
- * Instantly snaps element into view (zero scroll animation delay),
- * then measures viewport center coordinates immediately without desync risk.
- * @param {number} tabId
- * @param {string} elementRef
- * @param {boolean} [shouldScroll=true]
+ * Resolves viewport center coordinates for an element reference, rescuing visually-hidden
+ * inputs by targeting their visible associated label or wrapper.
  */
 async function getElementCenterCoordinates(tabId, elementRef, shouldScroll = true) {
   const res = await chrome.scripting.executeScript({
@@ -350,19 +344,29 @@ async function getElementCenterCoordinates(tabId, elementRef, shouldScroll = tru
       const el = window.__getElementByRef ? window.__getElementByRef(refId) : document.querySelector(refId);
       if (!el) throw new Error(`Element '${refId}' not found on page.`);
 
-      if (doScroll && typeof el.scrollIntoView === 'function') {
-        try {
-            el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-          } catch (e) {
-            try {
-              el.scrollIntoView({ block: 'center', inline: 'center' });
-            } catch (e2) {}
-          }
-		await new Promise((r) => setTimeout(r, 50));
+      let targetEl = el;
+      let rect = el.getBoundingClientRect();
+      if (rect.width < 2 || rect.height < 2) {
+        const assoc =
+          (el.labels && el.labels[0]) ||
+          (el.id ? document.querySelector(`label[for="${CSS.escape(el.id)}"]`) : null) ||
+          el.closest('label') ||
+          el.parentElement;
+        if (assoc) targetEl = assoc;
       }
 
-      // Read final settled bounding rect immediately
-      const rect = el.getBoundingClientRect();
+      if (doScroll && typeof targetEl.scrollIntoView === 'function') {
+        try {
+          targetEl.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        } catch (e) {
+          try {
+            targetEl.scrollIntoView({ block: 'center', inline: 'center' });
+          } catch (e2) {}
+        }
+        await new Promise((r) => setTimeout(r, 40));
+      }
+
+      rect = targetEl.getBoundingClientRect();
       const cx = Math.round(rect.left + rect.width / 2);
       const cy = Math.round(rect.top + rect.height / 2);
       return { x: cx, y: cy, tagName: el.tagName };
@@ -372,14 +376,9 @@ async function getElementCenterCoordinates(tabId, elementRef, shouldScroll = tru
   return res[0]?.result;
 }
 
-/**
- * Dispatches trusted hardware mouse click(s) via DevTools Protocol.
- * Enforces 10 cps click duration (100ms hold from mouse down to mouse up).
- */
 async function cdpClick(tabId, x, y, button = 'left', clickCount = 1) {
   const attached = await attachDebugger(tabId);
 
-  // Show visual ripple indicator on page
   await chrome.scripting.executeScript({
     target: { tabId },
     func: (cx, cy) => {
@@ -389,7 +388,6 @@ async function cdpClick(tabId, x, y, button = 'left', clickCount = 1) {
   }).catch(() => {});
 
   if (!attached) {
-    // Fallback if CDP is not available on restricted page
     return chrome.scripting.executeScript({
       target: { tabId },
       func: async (cx, cy, btn, cnt) => {
@@ -401,7 +399,6 @@ async function cdpClick(tabId, x, y, button = 'left', clickCount = 1) {
     });
   }
 
-  // 1. Dispatch mouseMoved (move into position)
   await sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
     type: "mouseMoved",
     x,
@@ -412,7 +409,6 @@ async function cdpClick(tabId, x, y, button = 'left', clickCount = 1) {
   const buttons = button === 'right' ? 2 : (button === 'middle' ? 4 : 1);
 
   for (let count = 1; count <= clickCount; count++) {
-    // 2. Mouse Press (trusted event with isTrusted: true)
     await sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
       type: "mousePressed",
       x,
@@ -422,10 +418,8 @@ async function cdpClick(tabId, x, y, button = 'left', clickCount = 1) {
       buttons
     });
 
-    // 10 CPS click duration: exactly 100ms hold from mouse down to mouse up
     await new Promise(r => setTimeout(r, 100));
 
-    // 3. Mouse Release (trusted event)
     await sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
       type: "mouseReleased",
       x,
@@ -443,14 +437,10 @@ async function cdpClick(tabId, x, y, button = 'left', clickCount = 1) {
   return true;
 }
 
-/**
- * Dispatches trusted hardware mouse hover via DevTools Protocol and maintains hover state.
- */
 async function cdpHover(tabId, x, y, hoverMs = 150) {
   const duration = Math.max(100, hoverMs);
   const attached = await attachDebugger(tabId);
 
-  // Show visual glowing hover indicator
   await chrome.scripting.executeScript({
     target: { tabId },
     func: (cx, cy, d) => {
@@ -471,32 +461,25 @@ async function cdpHover(tabId, x, y, hoverMs = 150) {
     });
   }
 
-  // Dispatch mouseMoved to trigger trusted hover
   await sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
     type: "mouseMoved",
     x,
     y
   });
 
-  // Maintain hover position for duration (at least 100ms)
   await new Promise(r => setTimeout(r, duration));
   return true;
 }
 
-/**
- * Dispatches trusted hardware drag & drop via DevTools Protocol.
- */
 async function cdpDrag(tabId, sx, sy, ex, ey) {
   const attached = await attachDebugger(tabId);
   if (!attached) {
     throw new Error("DevTools Protocol required for trusted drag & drop.");
   }
 
-  // 1. Move to start position
   await sendCdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: sx, y: sy });
   await new Promise(r => setTimeout(r, 60));
 
-  // 2. Mouse Press
   await sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
     type: "mousePressed",
     x: sx,
@@ -507,7 +490,6 @@ async function cdpDrag(tabId, sx, sy, ex, ey) {
   });
   await new Promise(r => setTimeout(r, 80));
 
-  // 3. Move along trajectory in micro-steps
   const steps = 8;
   for (let i = 1; i <= steps; i++) {
     const curX = Math.round(sx + (ex - sx) * (i / steps));
@@ -521,7 +503,6 @@ async function cdpDrag(tabId, sx, sy, ex, ey) {
     await new Promise(r => setTimeout(r, 25));
   }
 
-  // 4. Mouse Release
   await sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
     type: "mouseReleased",
     x: ex,
@@ -532,6 +513,29 @@ async function cdpDrag(tabId, sx, sy, ex, ey) {
   });
 
   return true;
+}
+
+/**
+ * Waits briefly for React/SPA microtasks and DOM mutations to settle after an interactive
+ * tool call, then captures the contextual accessibility delta and updated snapshot state.
+ */
+async function capturePostActionDelta(tabId) {
+  if (!tabId) return null;
+  try {
+    await new Promise(r => setTimeout(r, 75));
+    const res = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        if (typeof window.__generateAccessibilityTree === "function") {
+          return window.__generateAccessibilityTree("interactive", 30, 50000, null, "compact");
+        }
+        return null;
+      }
+    });
+    return res[0]?.result || null;
+  } catch (e) {
+    return null;
+  }
 }
 
 // Track active tab changes
@@ -552,8 +556,7 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
   } catch (e) {}
 });
 
-// Update title and URL when page navigates
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (tabId === activeMcpTabId) {
     if (changeInfo.title) sessionStats.activeTabTitle = changeInfo.title;
     if (changeInfo.url) sessionStats.activeTabUrl = changeInfo.url;
@@ -561,7 +564,6 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   }
 });
 
-// Handle tab close
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   detachDebugger(tabId);
   if (tabId === activeMcpTabId) {
@@ -651,7 +653,6 @@ async function connectWebSocketBridge() {
     socket = null;
   }
 
-  // Load configured port from storage if available
   try {
     const data = await chrome.storage.local.get(["wsPort"]);
     if (data.wsPort) currentWsPort = data.wsPort;
@@ -662,7 +663,6 @@ async function connectWebSocketBridge() {
   try {
     socket = new WebSocket(wsUrl);
 
-    // Timeout safety: if stuck in CONNECTING for > 4s, close and retry
     const connectTimeout = setTimeout(() => {
       if (socket && socket.readyState === WebSocket.CONNECTING) {
         try { socket.close(); } catch (e) {}
@@ -684,7 +684,6 @@ async function connectWebSocketBridge() {
       await verifyTabConfinement(null);
       if (activeMcpTabId) notifyBridgeTabConnected();
 
-      // Synchronize local preferences/files if any
       const localData = await chrome.storage.local.get(["preferences", "files"]);
       if (localData.preferences) {
         safeSend({
@@ -708,16 +707,13 @@ async function connectWebSocketBridge() {
       try {
         const msg = JSON.parse(event.data);
 
-        // Bi-directional sync notifications from MCP server
         if (msg.type === "preferences_sync" && msg.payload) {
-          console.log("[AutoResume] Preferences synchronized from MCP server.");
           await chrome.storage.local.set({ preferences: msg.payload });
           broadcastTelemetry();
           return;
         }
 
         if (msg.type === "file_sync" && msg.payload) {
-          console.log(`[AutoResume] File '${msg.payload.name}' synchronized from MCP server.`);
           const localData = await chrome.storage.local.get(["files"]);
           const files = localData.files || [];
           const existingIdx = files.findIndex(f => f.name.toLowerCase() === msg.payload.name.toLowerCase());
@@ -732,7 +728,6 @@ async function connectWebSocketBridge() {
         }
 
         if (msg.type === "bridge_handshake") {
-          console.log("[AutoResume] Bridge handshake verified.");
           return;
         }
 
@@ -824,7 +819,6 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
     if (!targetTabId) {
       throw new Error("No active browser tab connected to AutoResume. Please click the AutoResume extension icon in Chrome and ensure the target tab is in the 'AutoResume (MCP)' tab group.");
     }
-    // Activate target tab to prevent background timer throttling
     await chrome.tabs.update(targetTabId, { active: true }).catch(() => {});
     await ensureContentScriptsInjected(targetTabId);
   }
@@ -832,6 +826,8 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
   if (!isBatchSubStep) {
     sessionStats.toolsCalledCount++;
   }
+
+  let toolResult = null;
 
   switch (toolName) {
     case "browser_navigate": {
@@ -848,7 +844,6 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
           throw new Error(`Navigation blocked: Only http:// and https:// protocols are permitted. Provided: '${params.url}'`);
         }
         if (params.force) {
-          // Bypass beforeunload prompts
           await chrome.scripting.executeScript({
             target: { tabId: targetTabId },
             world: "MAIN",
@@ -858,64 +853,107 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
         await chrome.tabs.update(targetTabId, { url: params.url });
       }
       await waitForTabComplete(targetTabId);
-      return { success: true, message: `Navigated to ${params.url}` };
+      await ensureContentScriptsInjected(targetTabId);
+      toolResult = { success: true, message: `Navigated to ${params.url}` };
+      break;
     }
 
     case "browser_go_back": {
       await chrome.tabs.goBack(targetTabId);
       await waitForTabComplete(targetTabId);
-      return { success: true, message: "Navigated backward." };
+      await ensureContentScriptsInjected(targetTabId);
+      toolResult = { success: true, message: "Navigated backward." };
+      break;
     }
 
     case "browser_go_forward": {
       await chrome.tabs.goForward(targetTabId);
       await waitForTabComplete(targetTabId);
-      return { success: true, message: "Navigated forward." };
+      await ensureContentScriptsInjected(targetTabId);
+      toolResult = { success: true, message: "Navigated forward." };
+      break;
     }
 
     case "browser_snapshot":
     case "read_page": {
-      const filter = params.filter || "all";
-      const depth = params.depth || 15;
+      const filter = params.deltaOnly ? "delta" : (params.filter || "interactive");
+      const format = params.format || "compact";
+      const depth = params.depth || 30;
       const maxChars = params.maxChars || 50000;
       const rootRefId = params.rootRefId || null;
+
       const res = await chrome.scripting.executeScript({
         target: { tabId: targetTabId },
-        func: (f, d, mc, rr) => {
+        func: (f, d, mc, rr, fmt) => {
           if (typeof window.__generateAccessibilityTree === "function") {
-            return window.__generateAccessibilityTree(f, d, mc, rr);
+            return window.__generateAccessibilityTree(f, d, mc, rr, fmt);
           }
           return { yaml: "Accessibility tree script initializing... Please re-run.", url: window.location.href };
         },
-        args: [filter, depth, maxChars, rootRefId]
+        args: [filter, depth, maxChars, rootRefId, format]
       });
-      return res[0]?.result || { yaml: "Empty tree." };
+
+      const snap = res[0]?.result || { yaml: "Empty tree." };
+      if (params.deltaOnly || filter === "delta") {
+        return {
+          ...snap,
+          yaml: snap.delta?.deltaText || "[No DOM mutations detected]",
+          compactTree: snap.delta?.deltaText || "[No DOM mutations detected]"
+        };
+      }
+      return snap;
     }
 
     case "find": {
       const res = await chrome.scripting.executeScript({
         target: { tabId: targetTabId },
         func: (query) => {
+          // Ensure tree has indexed current interactive controls first
+          if (typeof window.__generateAccessibilityTree === "function") {
+            window.__generateAccessibilityTree("interactive", 30, 50000, null, "compact");
+          }
+
           if (typeof window.__getElementByRef === "function") {
-            let el = window.__getElementByRef(query);
-            if (!el && query && typeof query === "string") {
-              // Natural language fuzzy/token matching against interactive accessible text
-              const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
-              const candidates = Array.from(document.querySelectorAll('button, a, input, select, textarea, [role], label'));
-              for (const cand of candidates) {
-                const text = (cand.getAttribute('aria-label') || cand.getAttribute('placeholder') || cand.getAttribute('value') || cand.innerText || cand.textContent || '').toLowerCase();
-                if (tokens.every(t => text.includes(t))) {
-                  el = cand;
-                  break;
-                }
-              }
-            }
-            if (el) {
-              const ref = window.__registerElementRef ? window.__registerElementRef(el) : null;
-              return { found: true, ref, tagName: el.tagName, role: el.getAttribute('role') || el.tagName.toLowerCase() };
+            const direct = window.__getElementByRef(query);
+            if (direct) {
+              const ref = window.__registerElementRef ? window.__registerElementRef(direct) : null;
+              return {
+                found: true,
+                matches: [{
+                  ref,
+                  tagName: direct.tagName,
+                  role: direct.getAttribute('role') || direct.tagName.toLowerCase(),
+                  text: (direct.getAttribute('aria-label') || direct.innerText || direct.value || '').trim().slice(0, 100)
+                }]
+              };
             }
           }
-          return { found: false, query };
+
+          const tokens = String(query || '').toLowerCase().split(/\s+/).filter(Boolean);
+          const matches = [];
+          if (window.__lastAxNodeMap && window.__lastAxNodeMap.size > 0) {
+            for (const [ref, node] of window.__lastAxNodeMap.entries()) {
+              const haystack = `${node.role} ${node.subtype || ''} ${node.name || ''} ${node.value || ''} ${node.placeholder || ''} ${node.groupPath || ''}`.toLowerCase();
+              if (tokens.every(t => haystack.includes(t))) {
+                matches.push({
+                  ref,
+                  role: node.role,
+                  name: node.name,
+                  value: node.value,
+                  group: node.groupPath,
+                  formatted: node.formatted
+                });
+              }
+            }
+          }
+
+          return {
+            found: matches.length > 0,
+            count: matches.length,
+            ref: matches[0]?.ref || null,
+            matches: matches.slice(0, 15),
+            query
+          };
         },
         args: [params.query]
       });
@@ -973,7 +1011,8 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
 
       const clickCount = params.clickCount || 1;
       await cdpClick(targetTabId, x, y, params.button || "left", clickCount);
-      return { success: true, message: `Clicked at [${x}, ${y}]${elTag} (clickCount: ${clickCount}, 10 cps / 100ms hold, trusted CDP).` };
+      toolResult = { success: true, message: `Clicked at [${x}, ${y}]${elTag} (clickCount: ${clickCount}, 10 cps / 100ms hold, trusted CDP).` };
+      break;
     }
 
     case "browser_double_click": {
@@ -992,7 +1031,8 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
       }
 
       await cdpClick(targetTabId, x, y, params.button || "left", 2);
-      return { success: true, message: `Double-clicked at [${x}, ${y}]${elTag} (10 cps / 100ms hold, trusted CDP).` };
+      toolResult = { success: true, message: `Double-clicked at [${x}, ${y}]${elTag} (10 cps / 100ms hold, trusted CDP).` };
+      break;
     }
 
     case "browser_triple_click": {
@@ -1011,7 +1051,8 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
       }
 
       await cdpClick(targetTabId, x, y, params.button || "left", 3);
-      return { success: true, message: `Triple-clicked at [${x}, ${y}]${elTag} (10 cps / 100ms hold, trusted CDP).` };
+      toolResult = { success: true, message: `Triple-clicked at [${x}, ${y}]${elTag} (10 cps / 100ms hold, trusted CDP).` };
+      break;
     }
 
     case "browser_hover": {
@@ -1037,7 +1078,8 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
       }
 
       await cdpHover(targetTabId, x, y, hoverMs);
-      return { success: true, message: `Hovered at [${x}, ${y}]${elTag} for ${hoverMs}ms (trusted CDP).` };
+      toolResult = { success: true, message: `Hovered at [${x}, ${y}]${elTag} for ${hoverMs}ms (trusted CDP).` };
+      break;
     }
 
     case "browser_drag": {
@@ -1065,7 +1107,8 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
       }
 
       await cdpDrag(targetTabId, sx, sy, ex, ey);
-      return { success: true, message: `Dragged from [${sx}, ${sy}] to [${ex}, ${ey}] (trusted CDP).` };
+      toolResult = { success: true, message: `Dragged from [${sx}, ${sy}] to [${ex}, ${ey}] (trusted CDP).` };
+      break;
     }
 
     case "browser_type": {
@@ -1080,7 +1123,8 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
         },
         args: [element || null, text, clearValue, delay]
       });
-      return { success: true, message: `Typed into '${element || 'active element'}'.` };
+      toolResult = { success: true, message: `Typed into '${element || 'active element'}'.` };
+      break;
     }
 
     case "browser_press_key": {
@@ -1099,7 +1143,8 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
         },
         args: [params.key, params.modifiers || []]
       });
-      return { success: true, message: `Pressed key '${params.key}'.` };
+      toolResult = { success: true, message: `Pressed key '${params.key}'.` };
+      break;
     }
 
     case "browser_select_option": {
@@ -1135,7 +1180,8 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
       if (!res[0]?.result) {
         throw new Error(`Could not find matching option in '${params.element}' for values: ${JSON.stringify(params.values)}`);
       }
-      return { success: true, message: `Selected option on '${params.element}'.` };
+      toolResult = { success: true, message: `Selected option on '${params.element}'.` };
+      break;
     }
 
     case "form_input": {
@@ -1149,7 +1195,8 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
         },
         args: [params.ref || params.element, params.value]
       });
-      return res[0]?.result || { success: true };
+      toolResult = res[0]?.result || { success: true };
+      break;
     }
 
     case "file_upload": {
@@ -1182,7 +1229,8 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
         },
         args: [params.ref, filesToUpload]
       });
-      return res[0]?.result || { success: true };
+      toolResult = res[0]?.result || { success: true };
+      break;
     }
 
     case "browser_wait": {
@@ -1272,21 +1320,32 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
           }
 
           if (stopOnError) {
+            const failSnap = await capturePostActionDelta(targetTabId);
             return {
               batchCompleted: false,
               failedStep: i,
               error: `Batch halted at step ${i + 1} (${step.tool}): ${err.message}`,
-              steps: stepReports
+              steps: stepReports,
+              ...(failSnap ? {
+                delta: failSnap.delta,
+                compactTree: failSnap.compactTree,
+                yaml: failSnap.yaml,
+                title: failSnap.title,
+                url: failSnap.url,
+                interactiveCount: failSnap.interactiveCount,
+                totalNodes: failSnap.totalNodes
+              } : {})
             };
           }
         }
       }
 
-      return {
+      toolResult = {
         batchCompleted: true,
         totalSteps: actions.length,
         steps: stepReports
       };
+      break;
     }
 
     case "tabs_target": {
@@ -1320,7 +1379,6 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
     }
 
     case "tabs_context_mcp": {
-      // Validate that mcpGroupId exists
       if (mcpGroupId !== null) {
         try {
           const group = await chrome.tabGroups.get(mcpGroupId);
@@ -1404,6 +1462,24 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
     default:
       throw new Error(`Unsupported browser tool: '${toolName}'`);
   }
+
+  // Automatically capture post-action contextual delta for top-level mutating tool calls
+  if (!isBatchSubStep && targetTabId && MUTATING_BROWSER_TOOLS.has(toolName)) {
+    const postSnap = await capturePostActionDelta(targetTabId);
+    if (postSnap && toolResult && typeof toolResult === "object") {
+      toolResult.delta = postSnap.delta;
+      toolResult.compactTree = postSnap.compactTree;
+      toolResult.yaml = postSnap.yaml;
+      toolResult.title = postSnap.title;
+      toolResult.url = postSnap.url;
+      toolResult.interactiveCount = postSnap.interactiveCount;
+      toolResult.totalNodes = postSnap.totalNodes;
+      toolResult.focusedRef = postSnap.focusedRef;
+      toolResult.activeModalTitle = postSnap.activeModalTitle;
+    }
+  }
+
+  return toolResult;
 }
 
 async function waitForTabComplete(tabId) {
@@ -1552,7 +1628,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  // Handle file upload from side panel
   if (msg.type === "USER_UPLOADED_FILE") {
     chrome.storage.local.get(["files"], (data) => {
       const files = data.files || [];
@@ -1575,7 +1650,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  // Handle preferences update from side panel
   if (msg.type === "USER_SET_PREFERENCES") {
     const valResult = validatePreferences(msg.payload);
     if (!valResult.valid) {

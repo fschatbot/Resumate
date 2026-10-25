@@ -1,10 +1,11 @@
 /**
  * utils/ax-tree-tracker.js
  *
- * Server-side Accessibility Tree & DOM Mutation State Manager.
- * 1. Tracks element reference tokens (@e1, e1, ref_1) and full page state.
- * 2. Caches latest compact tree and hierarchical YAML for MCP Resources.
- * 3. Evaluates post-mutation deltas to return minimal token diffs in action tools.
+ * Server-side Accessibility Tree & Contextual Delta State Manager.
+ * 1. Tracks element reference tokens (@e1, e1, ref_1), group hierarchy, and active page state.
+ * 2. Caches latest Semantic Compact Tree and hierarchical YAML for MCP Resources.
+ * 3. Evaluates post-mutation deltas (from extension or server fallback) to return minimal
+ *    token diffs on mutating tool executions.
  */
 
 export class AXTreeTracker {
@@ -16,10 +17,12 @@ export class AXTreeTracker {
     this.latestUrl = "";
     this.latestInteractiveCount = 0;
     this.latestTotalNodes = 0;
+    this.latestFocusedRef = null;
+    this.latestActiveModal = null;
     this.lastUpdated = 0;
     this.latestDelta = null;
 
-    // Node state map for server-side delta diffing
+    // Server-side fallback node map: "@e1" -> parsed node state
     this.nodeStateMap = new Map();
 
     // Set of tool names that can mutate DOM state
@@ -51,24 +54,34 @@ export class AXTreeTracker {
   }
 
   /**
-   * Ingests a fresh accessibility snapshot from the browser extension.
-   * Computes or verifies the delta and updates cached resource representations.
+   * Ingests a fresh accessibility snapshot or post-action delta from the browser extension.
    * @param {object} snapshot
-   * @returns {object} delta
+   * @returns {object|null} delta
    */
   updatePageState(snapshot) {
     if (!snapshot) return null;
 
+    // If this is a mutating action result that embeds an extension-computed delta
+    if (snapshot.delta && !snapshot.compactTree && !snapshot.yaml) {
+      this.latestDelta = snapshot.delta;
+      if (snapshot.focusedRef !== undefined) this.latestFocusedRef = snapshot.focusedRef;
+      if (snapshot.activeModalTitle !== undefined) this.latestActiveModal = snapshot.activeModalTitle;
+      this.lastUpdated = Date.now();
+      return this.latestDelta;
+    }
+
     this.latestSnapshot = snapshot;
     this.latestCompactTree = snapshot.compactTree || snapshot.yaml || "";
-    this.latestYaml = snapshot.yaml || "";
-    this.latestTitle = snapshot.title || "";
-    this.latestUrl = snapshot.url || "";
-    this.latestInteractiveCount = snapshot.interactiveCount || 0;
-    this.latestTotalNodes = snapshot.totalNodes || 0;
+    this.latestYaml = snapshot.hierarchicalYaml || snapshot.yaml || this.latestCompactTree;
+    this.latestTitle = snapshot.title || this.latestTitle || "";
+    this.latestUrl = snapshot.url || this.latestUrl || "";
+    this.latestInteractiveCount = snapshot.interactiveCount ?? this.latestInteractiveCount;
+    this.latestTotalNodes = snapshot.totalNodes ?? this.latestTotalNodes;
+    this.latestFocusedRef = snapshot.focusedRef || null;
+    this.latestActiveModal = snapshot.activeModalTitle || null;
     this.lastUpdated = Date.now();
 
-    // If extension computed delta directly, accept it
+    // Prefer the rich contextual delta computed directly inside the page AST engine
     if (snapshot.delta) {
       this.latestDelta = snapshot.delta;
       this._indexNodesFromCompactTree(this.latestCompactTree);
@@ -84,18 +97,25 @@ export class AXTreeTracker {
   }
 
   /**
-   * Formats a mutating tool execution result with delta diff.
+   * Formats a mutating tool execution result with its post-action DOM delta.
    * @param {string} toolName
    * @param {any} result
-   * @param {object} delta
+   * @param {object} [explicitDelta]
    * @returns {string}
    */
-  formatActionResultWithDelta(toolName, result, delta) {
+  formatActionResultWithDelta(toolName, result, explicitDelta = null) {
+    const delta = explicitDelta || (result && result.delta) || null;
+
     let baseMessage = "";
     if (typeof result === "string") {
       baseMessage = result;
     } else if (result && result.message) {
       baseMessage = result.message;
+    } else if (result && result.batchCompleted !== undefined) {
+      const stepsCount = Array.isArray(result.steps) ? result.steps.length : 0;
+      baseMessage = result.batchCompleted
+        ? `Batch completed (${stepsCount} steps succeeded).`
+        : `${result.error || 'Batch halted on error.'}`;
     } else if (result && result.success !== undefined) {
       baseMessage = `Successfully executed ${toolName}.`;
     } else {
@@ -107,7 +127,7 @@ export class AXTreeTracker {
     }
 
     if (delta && !delta.hasChanges) {
-      return `${baseMessage} No DOM mutations detected.`;
+      return `${baseMessage} [No DOM mutations]`;
     }
 
     return baseMessage;
@@ -118,10 +138,13 @@ export class AXTreeTracker {
    * @returns {string}
    */
   getInteractiveElementsResource() {
+    if (this.latestCompactTree) {
+      return this.latestCompactTree;
+    }
     const header = this.latestTitle
-      ? `[Page: "${this.latestTitle}" | Interactive Nodes: ${this.latestInteractiveCount} | URL: ${this.latestUrl || ""}]\n\n`
+      ? `[# Page: "${this.latestTitle}" | Interactive: ${this.latestInteractiveCount} | URL: ${this.latestUrl || ""}]\n`
       : "";
-    return header + (this.latestCompactTree || "No interactive elements detected on active page.");
+    return header + "No interactive elements detected on active page.";
   }
 
   /**
@@ -130,7 +153,7 @@ export class AXTreeTracker {
    */
   getAxTreeResource() {
     const header = this.latestTitle
-      ? `[Page: "${this.latestTitle}" | Total Nodes: ${this.latestTotalNodes} | URL: ${this.latestUrl || ""}]\n\n`
+      ? `[# Page: "${this.latestTitle}" | Total Nodes: ${this.latestTotalNodes} | URL: ${this.latestUrl || ""}]\n\n`
       : "";
     return header + (this.latestYaml || this.latestCompactTree || "Accessibility tree empty.");
   }
@@ -146,37 +169,63 @@ export class AXTreeTracker {
     this.latestUrl = "";
     this.latestInteractiveCount = 0;
     this.latestTotalNodes = 0;
+    this.latestFocusedRef = null;
+    this.latestActiveModal = null;
     this.lastUpdated = 0;
     this.latestDelta = null;
     this.nodeStateMap.clear();
   }
 
-  // --- Internal Parsing & Diffing Helpers ---
+  // ============================================================================
+  // Internal Parsing & Fallback Diffing Helpers
+  // ============================================================================
 
   _indexNodesFromCompactTree(treeText) {
     if (!treeText) return;
     this.nodeStateMap = this._parseCompactTreeToMap(treeText);
   }
 
+  /**
+   * Parses both the new Semantic Compact Tree format:
+   *   `@e14 combobox "Shipping Method" = "Express" [expanded, required]`
+   * and legacy format:
+   *   `@e14 -> combobox "Shipping Method": "Express" [expanded, required]`
+   */
   _parseCompactTreeToMap(treeText) {
     const map = new Map();
     if (!treeText || typeof treeText !== "string") return map;
 
+    const groupStack = [];
     const lines = treeText.split('\n');
+
     for (const line of lines) {
       const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('[') || trimmed.startsWith('- RootWebArea')) continue;
+      if (!trimmed || trimmed.startsWith('[#') || trimmed.startsWith('- RootWebArea')) continue;
 
-      // Format: @e14 -> combobox "Shipping Method": "Express" [expanded, required]
-      const match = trimmed.match(/^(@e\d+|ref_\d+|e\d+)\s+->\s+([a-zA-Z0-9_-]+)\s*(.*)$/);
-      if (match) {
-        const ref = match[1];
-        const role = match[2];
-        const rest = match[3] || "";
+      const indentSpaces = Math.floor((line.match(/^\s*/)?.[0]?.length || 0) / 2);
+      while (groupStack.length > indentSpaces) {
+        groupStack.pop();
+      }
+
+      // Track group headers: [group "Work Experience 1"]
+      const groupMatch = trimmed.match(/^\[([a-zA-Z0-9:_-]+)(?:\s+"([^"]*)")?.*\]$/);
+      if (groupMatch && !trimmed.startsWith('[#')) {
+        groupStack[indentSpaces] = groupMatch[2] || groupMatch[1];
+        continue;
+      }
+
+      // Match @e14 combobox "Label" = "Value" [states] OR @e14 -> combobox "Label": "Value" [states]
+      const nodeMatch = trimmed.match(/^(@e\d+|ref_\d+|e\d+)\s+(?:->\s+)?([a-zA-Z0-9:_-]+)\s*(.*)$/);
+      if (nodeMatch) {
+        const ref = nodeMatch[1];
+        const role = nodeMatch[2];
+        const rest = nodeMatch[3] || "";
+        const groupPath = groupStack.filter(Boolean).join(' > ');
         map.set(ref, {
           ref,
           role,
           rest,
+          groupPath,
           raw: trimmed
         });
       }
@@ -193,35 +242,37 @@ export class AXTreeTracker {
     for (const [ref, curr] of currentMap.entries()) {
       if (!previousMap.has(ref)) {
         added.push(curr);
-        deltaLines.push(`+ ${curr.raw}`);
+        const prefix = curr.groupPath ? `[${curr.groupPath}] ` : '';
+        deltaLines.push(`+ ${prefix}${curr.raw}`);
       } else {
         const prev = previousMap.get(ref);
         if (curr.raw !== prev.raw) {
           changed.push({ ref, current: curr, previous: prev });
-          deltaLines.push(`~ ${ref}: ${curr.role} modified -> ${curr.rest}`);
+          deltaLines.push(`~ ${ref} ${curr.role}: ${curr.rest}`);
         }
       }
     }
 
+    const removedRefs = [];
     for (const [ref, prev] of previousMap.entries()) {
       if (!currentMap.has(ref)) {
         removed.push(prev);
-        deltaLines.push(`- ${prev.raw}`);
+        removedRefs.push(ref);
       }
     }
 
-    const hasChanges = (added.length > 0 || removed.length > 0 || changed.length > 0);
-
-    let deltaText = "";
-    if (hasChanges) {
-      deltaText = [
-        "[DOM Mutation Detected]",
-        "Changed Elements:",
-        ...deltaLines
-      ].join('\n');
+    if (removed.length > 6) {
+      deltaLines.push(`- Removed ${removed.length} elements (${removedRefs[0]}..${removedRefs[removedRefs.length - 1]})`);
     } else {
-      deltaText = "[No DOM mutations detected]";
+      for (const rm of removed) {
+        deltaLines.push(`- ${rm.raw}`);
+      }
     }
+
+    const hasChanges = added.length > 0 || removed.length > 0 || changed.length > 0;
+    const deltaText = hasChanges
+      ? `[DOM Mutation Delta | +${added.length} ~${changed.length} -${removed.length}]\n${deltaLines.join('\n')}`
+      : "[No DOM mutations detected]";
 
     return {
       hasChanges,

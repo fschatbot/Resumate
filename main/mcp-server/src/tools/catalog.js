@@ -51,30 +51,40 @@ export const TOOL_CATALOG = [
 		},
 	},
 
-	// --- Observation & Inspection ---
+	// --- Observation & Inspection (Updated in mcp-server/src/tools/catalog.js) ---
 	{
 		name: "browser_snapshot",
-		description: "Extracts a pruned accessibility tree or mutation delta of the active page with element reference handles (@e1, @e2, etc.). Supports compact flat matrix, hierarchical YAML, and delta-only updates.",
+		description:
+			"Extracts a logically compacted semantic accessibility tree or contextual mutation delta of the active page with stable element reference handles (@e1, @e2, etc.). Preserves parent question/section groupings while eliminating layout wrapper noise.",
 		inputSchema: {
 			type: "object",
 			properties: {
 				filter: {
 					type: "string",
 					enum: ["interactive", "all", "delta"],
-					description: "Filter level: 'interactive' for actionable controls (default); 'all' for full document structure; 'delta' for only mutated elements since last interaction.",
+					description:
+						"Filter level: 'interactive' for actionable controls and their parent question/section groups (default); 'all' to include all headings and text landmarks; 'delta' for only mutated elements and alerts since last interaction.",
 				},
 				deltaOnly: {
 					type: "boolean",
-					description: "If true, returns only newly added, removed, or changed elements since the last action/snapshot.",
+					description: "If true, returns only newly added, removed, or changed elements and validation alerts since the last action/snapshot.",
 				},
 				format: {
 					type: "string",
 					enum: ["compact", "yaml"],
-					description: "Output format: 'compact' (default) returns a token-dense flat matrix (@e... -> role \"name\"); 'yaml' returns full hierarchical tree.",
+					description: "Output format: 'compact' (default) returns a token-minimal grouped semantic tree (@e... role \"label\" = \"value\"); 'yaml' returns full hierarchical YAML.",
+				},
+				rootRefId: {
+					type: "string",
+					description: "Optional element reference (e.g. '@e10') to scope the snapshot to a specific modal, form, or section.",
 				},
 				depth: {
 					type: "integer",
-					description: "Max traversal depth. Default: 30.",
+					description: "Max logical semantic depth. Default: 30.",
+				},
+				maxChars: {
+					type: "integer",
+					description: "Maximum characters to return before truncation. Default: 50000.",
 				},
 				tabId: { type: "integer", description: "Target tab ID." },
 			},
@@ -82,7 +92,7 @@ export const TOOL_CATALOG = [
 	},
 	{
 		name: "read_page",
-		description: "Alias for browser_snapshot. Extracts a pruned accessibility tree or mutation delta of the active page.",
+		description: "Alias for browser_snapshot. Extracts a logically compacted semantic accessibility tree or mutation delta of the active page.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -93,16 +103,24 @@ export const TOOL_CATALOG = [
 				},
 				deltaOnly: {
 					type: "boolean",
-					description: "If true, returns only changed elements since last interaction.",
+					description: "If true, returns only changed elements and alerts since last interaction.",
 				},
 				format: {
 					type: "string",
 					enum: ["compact", "yaml"],
 					description: "Output format: 'compact' or 'yaml'.",
 				},
+				rootRefId: {
+					type: "string",
+					description: "Optional element reference (e.g. '@e10') to scope the snapshot to a specific container.",
+				},
 				depth: {
 					type: "integer",
-					description: "Max traversal depth. Default: 30.",
+					description: "Max logical semantic depth. Default: 30.",
+				},
+				maxChars: {
+					type: "integer",
+					description: "Maximum characters to return. Default: 50000.",
 				},
 				tabId: { type: "integer", description: "Target tab ID." },
 			},
