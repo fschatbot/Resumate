@@ -13,6 +13,22 @@
   if (window.__autoResumeElementMapInitialized) return;
   window.__autoResumeElementMapInitialized = true;
 
+  // Emulate permanent foreground visibility so backgrounded tabs don't pause timers or animations
+  try {
+    if (Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState')?.configurable !== false) {
+      Object.defineProperty(Document.prototype, 'visibilityState', {
+        get: () => 'visible',
+        configurable: true
+      });
+    }
+    if (Object.getOwnPropertyDescriptor(Document.prototype, 'hidden')?.configurable !== false) {
+      Object.defineProperty(Document.prototype, 'hidden', {
+        get: () => false,
+        configurable: true
+      });
+    }
+  } catch (e) {}
+
   // Primary map: "@e1" | "e1" | "ref_1" -> WeakRef<Element>
   window.__claudeElementMap = window.__claudeElementMap || {};
 

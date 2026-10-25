@@ -290,10 +290,17 @@ export async function attachDebugger(tabId) {
     // Enable Runtime and Network event domains for console/network monitoring
     chrome.debugger.sendCommand({ tabId }, "Runtime.enable", {}).catch(() => {});
     chrome.debugger.sendCommand({ tabId }, "Network.enable", {}).catch(() => {});
+    // Emulate permanent focus so the tab behaves as focused even when unfocused/in background
+    chrome.debugger.sendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => {});
+    // Keep page lifecycle state active to prevent background throttling
+    chrome.debugger.sendCommand({ tabId }, "Page.enable", {}).catch(() => {});
+    chrome.debugger.sendCommand({ tabId }, "Page.setWebLifecycleState", { state: "active" }).catch(() => {});
     return true;
   } catch (e) {
     if (e.message && e.message.includes("Already attached")) {
       attachedDebuggers.add(tabId);
+      chrome.debugger.sendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => {});
+      chrome.debugger.sendCommand({ tabId }, "Page.setWebLifecycleState", { state: "active" }).catch(() => {});
       return true;
     }
     console.warn(`[AutoResume CDP] Could not attach debugger to tab #${tabId}:`, e.message);
@@ -1018,7 +1025,10 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
     if (!targetTabId) {
       throw new Error("No active browser tab connected to AutoResume. Please click the AutoResume extension icon in Chrome and ensure the target tab is in the 'AutoResume (MCP)' tab group.");
     }
-    await chrome.tabs.update(targetTabId, { active: true }).catch(() => {});
+    // Only force foreground tab switch if explicitly requested
+    if (params.bringToFront || params.activateTab) {
+      await chrome.tabs.update(targetTabId, { active: true }).catch(() => {});
+    }
     await ensureContentScriptsInjected(targetTabId);
   }
 
@@ -1229,6 +1239,7 @@ export async function executeBrowserTool(toolName, params = {}, isBatchSubStep =
       }
 
       if (!base64) {
+        await chrome.tabs.update(targetTabId, { active: true }).catch(() => {});
         const tab = await chrome.tabs.get(targetTabId);
         const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
         base64 = dataUrl.replace(/^data:image\/png;base64,/, "");
